@@ -1,0 +1,106 @@
+---
+# ---------------------------------------------------------------------------
+# IPv6 in GRUB (RHEL family uses grubby/BLS)
+# ---------------------------------------------------------------------------
+- name: Check whether grubby is available
+  ansible.builtin.command:
+    cmd: command -v grubby
+  register: grubby_check
+  changed_when: false
+  failed_when: false
+
+- name: Check whether the kernel command line already disables IPv6
+  ansible.builtin.command:
+    cmd: grubby --info=ALL
+  register: grubby_info
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - grubby_check.rc == 0
+
+- name: Add the IPv6-disable kernel parameter with grubby
+  ansible.builtin.command:
+    cmd: grubby --update-kernel=ALL --args="ipv6.disable=1"
+  when:
+    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - grubby_check.rc == 0
+    - "'ipv6.disable=1' not in (grubby_info.stdout | default(''))"
+
+- name: Fall back to /etc/default/grub when grubby is unavailable
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX='
+    line: 'GRUB_CMDLINE_LINUX="ipv6.disable=1"'
+    state: present
+  register: grub_default
+  when:
+    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - grubby_check.rc != 0
+
+- name: Regenerate the GRUB configuration
+  ansible.builtin.command:
+    cmd: grub2-mkconfig -o /boot/grub2/grub.cfg
+  when:
+    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - grubby_check.rc != 0
+    - grub_default is changed
+
+- name: Explain why the GRUB IPv6 setting was not applied inside a container
+  ansible.builtin.debug:
+    msg: >-
+      IPv6 is disabled through {{ ipv6_sysctl_file }} at runtime, but the kernel
+      command line cannot be changed inside {{ ansible_virtualization_type }}.
+  when: ansible_virtualization_type in ['lxc', 'docker', 'podman', 'containerd']
+
+# ---------------------------------------------------------------------------
+# zram (zram-generator)
+# ---------------------------------------------------------------------------
+- name: Render the zram-generator configuration
+  ansible.builtin.copy:
+    dest: "{{ zram_generator_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      [zram0]
+      zram-size = ram * {{ zram_percent }} / 100
+      compression-algorithm = {{ zram_algorithm }}
+      swap-priority = {{ zram_priority }}
+  register: zram_generator_config_result
+
+- name: Try to load the zram kernel module
+  ansible.builtin.command:
+    cmd: modprobe zram
+  register: zram_modprobe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check for a zram device
+  ansible.builtin.stat:
+    path: /dev/zram0
+  register: zram_device
+
+- name: Remember whether zram is usable on this host
+  ansible.builtin.set_fact:
+    zram_usable: "{{ zram_modprobe.rc == 0 or zram_device.stat.exists }}"
+
+- name: Reload systemd so zram-generator is picked up
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: zram_usable
+
+- name: Start the zram setup service
+  ansible.builtin.systemd_service:
+    name: "{{ zram_generator_service }}"
+    state: "{{ 'restarted' if zram_generator_config_result is changed else 'started' }}"
+  when: zram_usable
+
+- name: Explain why zram was not started
+  ansible.builtin.debug:
+    msg: >-
+      The zram configuration is in {{ zram_generator_config }}, but the zram kernel
+      module is not available to this {{ ansible_virtualization_type }} environment.
+  when: not zram_usable

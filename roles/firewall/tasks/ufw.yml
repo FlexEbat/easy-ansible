@@ -1,0 +1,33 @@
+---
+- name: Configure UFW default policies
+  community.general.ufw:
+    policy: "{{ item.policy }}"
+    direction: "{{ item.direction }}"
+  loop:
+    - { policy: deny, direction: incoming }
+    - { policy: allow, direction: outgoing }
+    - { policy: deny, direction: routed }
+
+- name: Configure UFW logging
+  community.general.ufw:
+    logging: "{{ ufw_logging }}"
+
+- name: Allow SSH on the new random port
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+    from: "{{ item }}"
+    comment: "SSH on port {{ ssh_port }}"
+  loop: "{{ ssh_allowed_cidrs if (ssh_allowed_cidrs | length > 0) else ['any'] }}"
+
+- name: Deny SSH on the default port
+  community.general.ufw:
+    rule: deny
+    port: "22"
+    proto: tcp
+    comment: "SSH moved to {{ ssh_port }}"
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled

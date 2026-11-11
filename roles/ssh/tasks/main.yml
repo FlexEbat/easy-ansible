@@ -1,0 +1,170 @@
+---
+- name: Ensure sshd configuration drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Debian ships this Include by default; the RHEL family may not (older
+# releases put everything in sshd_config). Add it once, at the top, so the
+# hardening drop-in is always read.
+- name: Ensure sshd_config includes the drop-in directory
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    line: "Include /etc/ssh/sshd_config.d/*.conf"
+    regexp: '^Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$'
+    insertbefore: BOF
+    state: present
+  notify: Restart ssh
+
+- name: Ensure /run/sshd exists
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check whether the SSH port has already been persisted
+  ansible.builtin.stat:
+    path: "{{ ssh_port_state_file }}"
+  register: ssh_port_state
+
+- name: Read the persisted SSH port
+  ansible.builtin.slurp:
+    src: "{{ ssh_port_state_file }}"
+  register: ssh_port_slurp
+  when: ssh_port_state.stat.exists
+
+- name: Reuse the persisted SSH port
+  ansible.builtin.set_fact:
+    ssh_port: "{{ ssh_port_slurp.content | b64decode | trim | int }}"
+  when: ssh_port_state.stat.exists
+
+- name: Generate a random SSH port
+  ansible.builtin.set_fact:
+    ssh_port: "{{ range(ssh_port_min, ssh_port_max + 1) | random }}"
+  when: not ssh_port_state.stat.exists
+
+- name: Persist the SSH port
+  ansible.builtin.copy:
+    content: "{{ ssh_port }}\n"
+    dest: "{{ ssh_port_state_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# On the RHEL family sshd is confined by SELinux and cannot bind to a
+# non-standard port until that port is labelled ssh_port_t.
+- name: Allow the SSH port in SELinux
+  community.general.seport:
+    ports: "{{ ssh_port }}"
+    proto: tcp
+    setype: ssh_port_t
+    state: present
+  when:
+    - is_rhel | bool
+    - ansible_facts.get('selinux', {}).get('status', 'disabled') == 'enabled'
+  notify: Restart ssh
+
+- name: Render the SSH hardening drop-in
+  ansible.builtin.template:
+    src: 00-ansible-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-ansible-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ssh
+
+- name: Find other sshd drop-in files
+  ansible.builtin.find:
+    paths: /etc/ssh/sshd_config.d
+    patterns: "*.conf"
+    excludes:
+      - 00-ansible-hardening.conf
+    file_type: file
+  register: ssh_dropins
+
+- name: Disable conflicting Port directives in other drop-ins
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^\s*Port\s+\d+\s*$'
+    replace: '# Port disabled by Ansible (SSH moved to {{ ssh_port }})'
+  loop: "{{ ssh_dropins.files }}"
+  notify: Restart ssh
+
+- name: Disable conflicting Port directives in the main sshd_config
+  ansible.builtin.replace:
+    path: /etc/ssh/sshd_config
+    regexp: '^\s*Port\s+\d+\s*$'
+    replace: '# Port disabled by Ansible (SSH moved to {{ ssh_port }})'
+  notify: Restart ssh
+
+- name: Ensure .ssh directory exists for the admin user
+  ansible.builtin.file:
+    path: "{{ admin_home }}/.ssh"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_primary_gid }}"
+    mode: "0700"
+
+- name: Generate an SSH key pair for the admin user
+  ansible.builtin.command:
+    cmd: >-
+      ssh-keygen -q -t {{ ssh_key_type }} -N '' -C 'ansible@{{ inventory_hostname }}'
+      -f '{{ admin_home }}/.ssh/id_{{ ssh_key_type }}'
+    creates: "{{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
+  become: true
+  become_user: "{{ admin_user }}"
+
+- name: Read the generated public key
+  ansible.builtin.slurp:
+    src: "{{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
+  register: ssh_public_key_raw
+
+- name: Authorize the generated key for the admin user
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ ssh_public_key_raw.content | b64decode }}"
+    state: present
+
+- name: Read the SSH key fingerprint
+  ansible.builtin.command:
+    cmd: "ssh-keygen -lf {{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
+  register: ssh_key_fingerprint
+  changed_when: false
+
+- name: Ensure the SSH host keys exist
+  ansible.builtin.command:
+    cmd: ssh-keygen -A
+  changed_when: false
+
+- name: Validate the sshd configuration
+  ansible.builtin.command:
+    cmd: /usr/sbin/sshd -t -f /etc/ssh/sshd_config
+  changed_when: false
+
+- name: Ensure the SSH service is enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ ssh_service_name }}"
+    enabled: true
+    state: started
+
+- name: Fetch the generated private key to the control node (optional)
+  ansible.builtin.fetch:
+    src: "{{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
+    dest: "{{ ssh_key_fetch_dir }}/{{ inventory_hostname }}_id_{{ ssh_key_type }}"
+    flat: true
+  when: ssh_key_fetch | bool
+
+- name: Show SSH configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "SSH port:       {{ ssh_port }}"
+      - "Admin user:     {{ admin_user }}"
+      - "Private key:    {{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
+      - "Public key:     {{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
+      - "Key fingerprint: {{ ssh_key_fingerprint.stdout | trim }}"
+      - "Port is stored in: {{ ssh_port_state_file }}"

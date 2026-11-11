@@ -1,0 +1,70 @@
+---
+- name: Ensure the sudo group exists
+  ansible.builtin.group:
+    name: "{{ sudo_group }}"
+    state: present
+
+- name: Ensure admin user exists
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    state: present
+    create_home: true
+    shell: /bin/bash
+    groups: "{{ admin_user_groups }}"
+    append: true
+  when: admin_user != 'root'
+
+- name: Look up admin user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ admin_user }}"
+
+- name: Set admin user facts
+  ansible.builtin.set_fact:
+    admin_home: "{{ getent_passwd[admin_user][4] }}"
+    admin_primary_gid: "{{ getent_passwd[admin_user][2] }}"
+
+- name: Ensure the admin user's Ansible remote temp directory exists
+  ansible.builtin.file:
+    path: "{{ admin_home }}/.ansible/tmp"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_primary_gid }}"
+    mode: "0700"
+  when: admin_user != 'root'
+
+- name: Read admin user group membership
+  ansible.builtin.command:
+    cmd: "id -nG {{ admin_user }}"
+  register: admin_group_check
+  changed_when: false
+  failed_when: false
+
+- name: Assert admin user has sudo access
+  ansible.builtin.assert:
+    that:
+      - admin_user == 'root' or sudo_group in (admin_group_check.stdout | default('')).split()
+    fail_msg: >-
+      {{ admin_user }} is not a member of the {{ sudo_group }} group.
+    success_msg: >-
+      {{ admin_user }} has sudo access.
+
+- name: Configure passwordless sudo for the admin user
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-{{ admin_user }}"
+    content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when:
+    - admin_user != 'root'
+    - admin_user_sudo_nopasswd | bool
+
+- name: Remove passwordless sudo file when it is disabled
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/90-{{ admin_user }}"
+    state: absent
+  when:
+    - admin_user != 'root'
+    - not (admin_user_sudo_nopasswd | bool)

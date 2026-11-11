@@ -1,0 +1,8 @@
+---
+- name: Apply the Debian/Ubuntu base configuration
+  ansible.builtin.include_tasks: debian.yml
+  when: is_debian | bool
+
+- name: Apply the RHEL family base configuration
+  ansible.builtin.include_tasks: rhel.yml
+  when: is_rhel | bool

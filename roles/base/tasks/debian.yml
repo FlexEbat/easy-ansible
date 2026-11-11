@@ -1,0 +1,94 @@
+---
+- name: Update apt cache and upgrade all packages
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    upgrade: dist
+    autoremove: true
+    autoclean: true
+    dpkg_options: "force-confdef,force-confold"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: apt_upgrade
+  retries: 3
+  delay: 5
+  until: apt_upgrade is succeeded
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ base_packages_common + base_packages_debian }}"
+    state: present
+    dpkg_options: "force-confdef,force-confold"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+# ---------------------------------------------------------------------------
+# Trippy: Debian ships it, Ubuntu does not, so Ubuntu gets the upstream
+# release (.deb on amd64, tarball on other architectures).
+# ---------------------------------------------------------------------------
+- name: Install trippy from the Debian repository
+  ansible.builtin.apt:
+    name: trippy
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: ansible_facts['distribution'] == 'Debian'
+
+- name: Check whether trippy is already installed
+  ansible.builtin.command:
+    cmd: sh -c 'command -v trippy || command -v trip'
+  register: trippy_check
+  changed_when: false
+  failed_when: false
+  when: ansible_facts['distribution'] == 'Ubuntu'
+
+- name: Download the trippy .deb (Ubuntu amd64)
+  ansible.builtin.get_url:
+    url: "{{ trippy_deb_url }}"
+    dest: "/tmp/trippy_{{ trippy_version }}_amd64.deb"
+    mode: "0644"
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - trippy_check.rc != 0
+    - ansible_facts['architecture'] == 'x86_64'
+
+- name: Install the trippy .deb (Ubuntu amd64)
+  ansible.builtin.apt:
+    deb: "/tmp/trippy_{{ trippy_version }}_amd64.deb"
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - trippy_check.rc != 0
+    - ansible_facts['architecture'] == 'x86_64'
+
+- name: Download the trippy tarball (Ubuntu non-amd64)
+  ansible.builtin.get_url:
+    url: "{{ trippy_tarball_url }}"
+    dest: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+    mode: "0644"
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - trippy_check.rc != 0
+    - ansible_facts['architecture'] != 'x86_64'
+
+- name: Install the trippy binary (Ubuntu non-amd64)
+  block:
+    - name: Extract the trippy tarball (Ubuntu non-amd64)
+      ansible.builtin.unarchive:
+        src: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+        dest: "{{ trippy_extract_dir }}"
+        remote_src: true
+        creates: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
+
+    - name: Copy the trippy binary into /usr/local/bin (Ubuntu non-amd64)
+      ansible.builtin.copy:
+        src: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
+        dest: /usr/local/bin/trip
+        remote_src: true
+        mode: "0755"
+  when:
+    - ansible_facts['distribution'] == 'Ubuntu'
+    - trippy_check.rc != 0
+    - ansible_facts['architecture'] != 'x86_64'

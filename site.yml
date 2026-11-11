@@ -1,0 +1,84 @@
+---
+- name: Update, harden and configure Linux server
+  hosts: all
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert that the operating system is supported
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] in ['Debian', 'RedHat']
+          - ansible_facts['distribution'] in ['Debian', 'Ubuntu', 'RedHat', 'CentOS', 'Rocky', 'AlmaLinux', 'OracleLinux']
+        fail_msg: >-
+          Unsupported operating system: {{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }} (family
+          {{ ansible_facts['os_family'] }}). Supported families are
+          Debian/Ubuntu and RHEL (RedHat, CentOS, Rocky, AlmaLinux, Oracle Linux).
+        success_msg: >-
+          Supported operating system: {{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }}.
+
+  roles:
+    - base
+    - admin_user
+    - ssh
+    - firewall
+    - crowdsec
+    - kernel
+    - docker
+
+  post_tasks:
+    # Make sure the sshd restart (and any other queued handler) happens before
+    # the final summary/verification.
+    - name: Apply queued handlers
+      ansible.builtin.meta: flush_handlers
+
+    # If the play failed after writing the SSH config but before handlers ran,
+    # the next successful run has nothing to notify and sshd would stay on the
+    # old port. Detect that case and restart explicitly.
+    - name: Check whether sshd is listening on the configured port
+      ansible.builtin.command:
+        cmd: "ss -ltnH 'sport = :{{ ssh_port }}'"
+      register: sshd_port_check
+      changed_when: false
+      failed_when: false
+
+    - name: Restart ssh if it is not listening on the configured port
+      ansible.builtin.systemd_service:
+        name: "{{ ssh_service_name }}"
+        state: restarted
+      when: sshd_port_check.stdout | trim == ''
+
+    - name: Write setup summary
+      ansible.builtin.copy:
+        dest: /etc/ansible-setup-summary.json
+        mode: "0644"
+        owner: root
+        group: root
+        content: |
+          {{ {
+            'os_family': ansible_facts['os_family'],
+            'distribution': ansible_facts['distribution'],
+            'distribution_version': ansible_facts['distribution_version'],
+            'admin_user': admin_user,
+            'admin_home': admin_home,
+            'sudo_group': sudo_group,
+            'firewall_backend': firewall_backend,
+            'ssh_port': ssh_port | int,
+            'ssh_private_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type,
+            'ssh_public_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type ~ '.pub',
+            'ssh_port_file': ssh_port_state_file,
+            'ssh_allowed_from': (ssh_allowed_cidrs if ssh_allowed_cidrs | length > 0 else ['any'])
+          } | to_nice_json }}
+
+    - name: Show setup summary
+      ansible.builtin.debug:
+        msg:
+          - "OS:               {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }})"
+          - "SSH port:         {{ ssh_port }}"
+          - "SSH private key:  {{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
+          - "SSH public key:   {{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
+          - "Firewall:         {{ firewall_backend }}"
+          - "Summary file:     /etc/ansible-setup-summary.json"

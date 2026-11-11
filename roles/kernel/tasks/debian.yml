@@ -1,0 +1,91 @@
+---
+# ---------------------------------------------------------------------------
+# IPv6 in GRUB
+# ---------------------------------------------------------------------------
+- name: Ensure the GRUB drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/default/grub.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Add the IPv6-disable kernel parameter for GRUB
+  ansible.builtin.copy:
+    dest: "{{ ipv6_grub_dropin }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX ipv6.disable=1"
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT ipv6.disable=1"
+  register: ipv6_grub_config
+
+- name: Check whether update-grub is available
+  ansible.builtin.command:
+    cmd: command -v update-grub
+  register: update_grub
+  changed_when: false
+  failed_when: false
+
+- name: Regenerate the GRUB configuration
+  ansible.builtin.command:
+    cmd: update-grub
+  when:
+    - ipv6_grub_config is changed
+    - update_grub.rc == 0
+
+# ---------------------------------------------------------------------------
+# zram (zram-tools)
+# ---------------------------------------------------------------------------
+- name: Render the zram configuration
+  ansible.builtin.template:
+    src: zramswap.j2
+    dest: /etc/default/zramswap
+    owner: root
+    group: root
+    mode: "0644"
+  register: zram_config
+
+- name: Try to load the zram kernel module
+  ansible.builtin.command:
+    cmd: modprobe zram
+  register: zram_modprobe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check for a zram device
+  ansible.builtin.stat:
+    path: /dev/zram0
+  register: zram_device
+
+- name: Remember whether zram is usable on this host
+  ansible.builtin.set_fact:
+    zram_usable: "{{ zram_modprobe.rc == 0 or zram_device.stat.exists }}"
+
+- name: Enable the zramswap service
+  ansible.builtin.systemd_service:
+    name: zramswap
+    enabled: "{{ zram_usable }}"
+
+- name: Start or restart the zramswap service
+  ansible.builtin.systemd_service:
+    name: zramswap
+    state: "{{ 'restarted' if zram_config is changed else 'started' }}"
+  when: zram_usable
+
+- name: Keep zramswap stopped when zram is unavailable
+  ansible.builtin.systemd_service:
+    name: zramswap
+    state: stopped
+  when: not zram_usable
+
+- name: Explain why zram was not started
+  ansible.builtin.debug:
+    msg: >-
+      The zram configuration is in /etc/default/zramswap, but the zram kernel module
+      is not available to this {{ ansible_virtualization_type }} environment.
+      zramswap was left disabled.
+  when: not zram_usable

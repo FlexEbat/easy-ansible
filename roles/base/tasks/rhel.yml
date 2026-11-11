@@ -1,0 +1,88 @@
+---
+- name: Upgrade all packages
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    update_cache: true
+  register: dnf_upgrade
+  retries: 3
+  delay: 5
+  until: dnf_upgrade is succeeded
+
+# EPEL is in the extras repository on AlmaLinux/Rocky/CentOS but not on RHEL
+# itself, where it has to be installed from the Fedora project.
+- name: Ensure EPEL is available
+  block:
+    - name: Install EPEL from the distribution repositories
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+
+  rescue:
+    - name: Install EPEL from the Fedora project
+      ansible.builtin.dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_facts['distribution_major_version'] }}.noarch.rpm"
+        state: present
+        disable_gpg_check: true
+
+- name: Install required packages
+  ansible.builtin.dnf:
+    name: "{{ base_packages_common + base_packages_rhel }}"
+    state: present
+
+# ---------------------------------------------------------------------------
+# Trippy is not packaged for the RHEL family (including EPEL), so install the
+# upstream release. x86_64 has an RPM; other architectures use the tarball.
+# ---------------------------------------------------------------------------
+- name: Check whether trippy is already installed
+  ansible.builtin.command:
+    cmd: sh -c 'command -v trippy || command -v trip'
+  register: trippy_check
+  changed_when: false
+  failed_when: false
+
+- name: Download the trippy RPM
+  ansible.builtin.get_url:
+    url: "{{ trippy_rpm_url }}"
+    dest: "/tmp/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
+    mode: "0644"
+  when:
+    - trippy_check.rc != 0
+    - trippy_rpm_arch == 'x86_64'
+
+- name: Install the trippy RPM
+  ansible.builtin.dnf:
+    name: "/tmp/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
+    state: present
+    disable_gpg_check: true
+  when:
+    - trippy_check.rc != 0
+    - trippy_rpm_arch == 'x86_64'
+
+- name: Download the trippy tarball (non-x86_64)
+  ansible.builtin.get_url:
+    url: "{{ trippy_tarball_url }}"
+    dest: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+    mode: "0644"
+  when:
+    - trippy_check.rc != 0
+    - trippy_rpm_arch != 'x86_64'
+
+- name: Install the trippy binary (non-x86_64)
+  block:
+    - name: Extract the trippy tarball (non-x86_64)
+      ansible.builtin.unarchive:
+        src: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+        dest: "{{ trippy_extract_dir }}"
+        remote_src: true
+        creates: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
+
+    - name: Copy the trippy binary into /usr/local/bin (non-x86_64)
+      ansible.builtin.copy:
+        src: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
+        dest: /usr/local/bin/trip
+        remote_src: true
+        mode: "0755"
+  when:
+    - trippy_check.rc != 0
+    - trippy_rpm_arch != 'x86_64'

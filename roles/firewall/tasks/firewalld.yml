@@ -1,0 +1,71 @@
+---
+- name: Ensure firewalld is enabled and running
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started
+
+- name: Determine the default firewalld zone
+  ansible.builtin.command:
+    cmd: firewall-cmd --get-default-zone
+  register: firewalld_default_zone
+  changed_when: false
+  when: firewalld_zone | length == 0
+
+- name: Use the default firewalld zone when none was configured
+  ansible.builtin.set_fact:
+    firewalld_zone: "{{ firewalld_default_zone.stdout | trim }}"
+  when: firewalld_zone | length == 0
+
+- name: Allow SSH on the new random port
+  ansible.posix.firewalld:
+    port: "{{ ssh_port }}/tcp"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  when: (ssh_allowed_cidrs | length) == 0
+
+# Source-restricted access uses rich rules instead of opening the port to the
+# whole zone, and makes sure a previously opened port does not stay open.
+- name: Restrict SSH to the configured source networks
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item }}"
+      port port="{{ ssh_port }}" protocol="tcp" accept
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ ssh_allowed_cidrs }}"
+  when: (ssh_allowed_cidrs | length) > 0
+
+- name: Close the new SSH port when source restrictions are configured
+  ansible.posix.firewalld:
+    port: "{{ ssh_port }}/tcp"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: disabled
+  when: (ssh_allowed_cidrs | length) > 0
+
+- name: Remove the default SSH service from the zone
+  ansible.posix.firewalld:
+    service: ssh
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: disabled
+
+- name: Remove any explicit port 22 rule from the zone
+  ansible.posix.firewalld:
+    port: "22/tcp"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: disabled
+
+- name: Reload firewalld
+  ansible.builtin.command:
+    cmd: firewall-cmd --reload
+  changed_when: false

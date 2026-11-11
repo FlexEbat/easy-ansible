@@ -1,0 +1,105 @@
+---
+- name: Apply the Debian/Ubuntu CrowdSec installation
+  ansible.builtin.include_tasks: debian.yml
+  when: is_debian | bool
+
+- name: Apply the RHEL family CrowdSec installation
+  ansible.builtin.include_tasks: rhel.yml
+  when: is_rhel | bool
+
+- name: Ensure the CrowdSec agent is enabled and running
+  ansible.builtin.systemd_service:
+    name: crowdsec
+    enabled: true
+    state: started
+
+- name: Wait for the CrowdSec Local API
+  ansible.builtin.command:
+    cmd: cscli lapi status
+  register: crowdsec_lapi
+  changed_when: false
+  retries: 15
+  delay: 2
+  until: crowdsec_lapi.rc == 0
+
+- name: Read registered CrowdSec bouncers
+  ansible.builtin.command:
+    cmd: cscli bouncers list -o json
+  register: crowdsec_bouncers
+  changed_when: false
+  failed_when: false
+
+- name: Build the list of registered bouncer types
+  ansible.builtin.set_fact:
+    crowdsec_bouncer_types: >-
+      {{
+        (crowdsec_bouncers.stdout | from_json)
+        | map(attribute='type')
+        | list
+      }}
+  when: crowdsec_bouncers.rc == 0
+
+# Most CrowdSec bouncer packages register themselves during installation.
+# If that did not happen (for example because the LAPI was not ready yet),
+# create a bouncer and write its key to the package's .local override file.
+- name: Register the CrowdSec firewall bouncer manually
+  ansible.builtin.command:
+    cmd: cscli bouncers add firewall-bouncer -o raw
+  register: crowdsec_bouncer_add
+  when:
+    - crowdsec_bouncers.rc == 0
+    - "'crowdsec-firewall-bouncer' not in (crowdsec_bouncer_types | default([]))"
+
+- name: Write the bouncer API key
+  ansible.builtin.copy:
+    dest: "{{ crowdsec_bouncer_config }}.local"
+    content: |
+      mode: nftables
+      api_key: {{ crowdsec_bouncer_add.stdout | trim }}
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - crowdsec_bouncer_add is changed
+    - crowdsec_bouncer_add.stdout is defined
+  notify: Restart crowdsec firewall bouncer
+
+- name: Ensure the CrowdSec firewall bouncer is enabled and running
+  ansible.builtin.systemd_service:
+    name: crowdsec-firewall-bouncer
+    enabled: true
+    state: started
+
+- name: Read installed CrowdSec collections
+  ansible.builtin.command:
+    cmd: cscli collections list -o json
+  register: crowdsec_collections
+  changed_when: false
+  failed_when: false
+
+- name: Build the list of installed CrowdSec collections
+  ansible.builtin.set_fact:
+    crowdsec_collection_names: >-
+      {{
+        (crowdsec_collections.stdout | from_json).collections
+        | map(attribute='name')
+        | list
+      }}
+  when: crowdsec_collections.rc == 0
+
+- name: Install missing CrowdSec collections
+  ansible.builtin.command:
+    cmd: "cscli collections install {{ item }}"
+  loop:
+    - crowdsecurity/linux
+    - crowdsecurity/sshd
+  register: crowdsec_collection_install
+  changed_when: "'already installed' not in crowdsec_collection_install.stdout"
+  when:
+    - crowdsec_collections.rc == 0
+    - item not in (crowdsec_collection_names | default([]))
+
+- name: Show CrowdSec collections
+  ansible.builtin.debug:
+    msg: >-
+      Enabled collections: {{ crowdsec_collection_names | default([]) | join(', ') }}

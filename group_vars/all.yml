@@ -1,0 +1,157 @@
+---
+# ---------------------------------------------------------------------------
+# Operating system helpers (Debian/Ubuntu and RHEL family)
+# ---------------------------------------------------------------------------
+is_debian: "{{ ansible_facts['os_family'] == 'Debian' }}"
+is_rhel: "{{ ansible_facts['os_family'] == 'RedHat' }}"
+sudo_group: "{{ 'wheel' if ansible_facts['os_family'] == 'RedHat' else 'sudo' }}"
+ssh_service_name: "{{ 'sshd' if ansible_facts['os_family'] == 'RedHat' else 'ssh' }}"
+firewall_backend: "{{ 'firewalld' if ansible_facts['os_family'] == 'RedHat' else 'ufw' }}"
+docker_repo_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else 'debian' }}"
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+# Docker and CrowdSec are installed by their own roles because they may need a
+# third-party repository (Docker CE on all supported distributions, CrowdSec
+# on the RHEL family).
+base_packages_common:
+  - sudo
+  - curl
+  - wget
+  - git
+  - ca-certificates
+  - kmod
+  - openssh-server
+
+base_packages_debian:
+  - openssh-client
+  - procps
+  - ufw
+  - mtr
+  - zram-tools
+
+# trippy is not in the RHEL/EPEL repositories and is installed by the base
+# role from an upstream release instead. Ubuntu also does not package it.
+base_packages_rhel:
+  - openssh-clients
+  - procps-ng
+  - firewalld
+  - python3-firewall
+  - policycoreutils-python-utils
+  - dnf-plugins-core
+  - mtr
+  - zram-generator
+
+trippy_version: "0.13.0"
+trippy_rpm_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
+trippy_rpm_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
+trippy_tarball_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
+trippy_tarball_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu.tar.gz"
+trippy_extract_dir: "/tmp/trippy-{{ trippy_version }}"
+trippy_tarball_member: "trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu/trip"
+trippy_deb_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy_x86_64-unknown-linux-gnu_{{ trippy_version }}_amd64.deb"
+
+# ---------------------------------------------------------------------------
+# Admin user / sudo
+# ---------------------------------------------------------------------------
+# $USER of the invoking user is used by default. Override with:
+#   ansible-playbook site.yml -e admin_user=alice
+admin_user: "{{ lookup('env', 'SUDO_USER') or lookup('env', 'USER') or ansible_user_id }}"
+# "sudo" on Debian/Ubuntu, "wheel" on the RHEL family.
+admin_user_groups:
+  - "{{ sudo_group }}"
+# With a locked password (newly created users have one), plain sudo group
+# membership is not usable without a password. Enable NOPASSWD for the
+# generated key-only admin. Set to false if you manage sudoers separately.
+admin_user_sudo_nopasswd: true
+
+# ---------------------------------------------------------------------------
+# SSH
+# ---------------------------------------------------------------------------
+# A port is chosen once and stored in ssh_port_state_file. Subsequent runs
+# reuse it, so the playbook is idempotent.
+ssh_port_min: 20000
+ssh_port_max: 32000
+ssh_port_state_file: /etc/ansible-ssh-port
+ssh_permit_root_login: prohibit-password
+ssh_password_authentication: false
+ssh_key_type: ed25519
+# Empty list = allow the new SSH port from any source.
+# Change to e.g. ["10.0.0.0/8", "192.168.0.0/16"] to restrict access further.
+# Port 22 is always explicitly denied.
+ssh_allowed_cidrs: []
+# Copy the generated private key back to the control node.
+ssh_key_fetch: false
+ssh_key_fetch_dir: "{{ playbook_dir }}/artifacts"
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
+ufw_logging: low
+# Empty = use the firewalld default zone. Set explicitly to override.
+firewalld_zone: ""
+
+# ---------------------------------------------------------------------------
+# Kernel: BBR / IPv6 / zram
+# ---------------------------------------------------------------------------
+bbr_sysctl_file: /etc/sysctl.d/99-bbr.conf
+ipv6_sysctl_file: /etc/sysctl.d/99-disable-ipv6.conf
+ipv6_grub_dropin: /etc/default/grub.d/99-disable-ipv6.cfg
+
+zram_algorithm: zstd
+zram_percent: 25
+zram_priority: 100
+# RHEL family only: zram-generator configuration.
+zram_generator_config: /etc/systemd/zram-generator.conf
+zram_generator_service: systemd-zram-setup@zram0.service
+
+# ---------------------------------------------------------------------------
+# CrowdSec
+# ---------------------------------------------------------------------------
+# Debian/Ubuntu ship CrowdSec in the distribution repositories. The RHEL
+# family does not, so the official CrowdSec packagecloud repository is used
+# there.
+crowdsec_packages_debian:
+  - crowdsec
+  - crowdsec-firewall-bouncer
+# packagecloud publishes the bouncer split by backend; the RHEL family uses
+# the nftables variant (firewalld is nftables-based).
+crowdsec_packages_rhel:
+  - crowdsec
+  - crowdsec-firewall-bouncer-nftables
+crowdsec_rhel_repo_file: /etc/yum.repos.d/crowdsec_crowdsec.repo
+crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/$releasever/$basearch"
+crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+docker_service_enabled: true
+# Packages from the distribution that conflict with Docker CE.
+docker_conflicting_packages_debian:
+  - docker.io
+  - docker-doc
+  - docker-compose
+  - docker-buildx
+  - docker-cli
+  - podman-docker
+  - containerd
+  - runc
+docker_conflicting_packages_rhel:
+  - docker
+  - docker-client
+  - docker-client-latest
+  - docker-common
+  - docker-latest
+  - docker-latest-logrotate
+  - docker-logrotate
+  - docker-engine
+  - podman
+  - runc
+docker_ce_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin

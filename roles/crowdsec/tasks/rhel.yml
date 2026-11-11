@@ -1,0 +1,41 @@
+---
+# CrowdSec is not shipped in the RHEL family repositories (including EPEL),
+# so use the official packagecloud repository.
+- name: Add the CrowdSec packagecloud repository
+  ansible.builtin.copy:
+    dest: "{{ crowdsec_rhel_repo_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [crowdsec_crowdsec]
+      name=crowdsec_crowdsec
+      baseurl={{ crowdsec_rhel_repo_url }}
+      repo_gpgcheck=1
+      gpgcheck=1
+      enabled=1
+      gpgkey=https://packagecloud.io/crowdsec/crowdsec/gpgkey
+             https://packagecloud.io/crowdsec/crowdsec/gpgkey/crowdsec-crowdsec-C822EDD6B39954A1.pub.gpg
+             https://packagecloud.io/crowdsec/crowdsec/gpgkey/crowdsec-crowdsec-FED78314A2468CCF.pub.gpg
+      sslverify=1
+      sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+      metadata_expire=300
+
+      [crowdsec_crowdsec-source]
+      name=crowdsec_crowdsec-source
+      baseurl={{ crowdsec_rhel_repo_url }}/SRPMS
+      repo_gpgcheck=1
+      gpgcheck=1
+      enabled=0
+      gpgkey=https://packagecloud.io/crowdsec/crowdsec/gpgkey
+             https://packagecloud.io/crowdsec/crowdsec/gpgkey/crowdsec-crowdsec-C822EDD6B39954A1.pub.gpg
+             https://packagecloud.io/crowdsec/crowdsec/gpgkey/crowdsec-crowdsec-FED78314A2468CCF.pub.gpg
+      sslverify=1
+      sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+      metadata_expire=300
+
+- name: Install CrowdSec from packagecloud
+  ansible.builtin.dnf:
+    name: "{{ crowdsec_packages_rhel }}"
+    state: present
+    update_cache: true

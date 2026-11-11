@@ -1,0 +1,6 @@
+---
+- name: Install CrowdSec from the distribution repositories
+  ansible.builtin.apt:
+    name: "{{ crowdsec_packages_debian }}"
+    state: present
+    update_cache: true

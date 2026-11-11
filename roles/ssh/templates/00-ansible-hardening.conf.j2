@@ -1,0 +1,13 @@
+# Managed by Ansible. Do not edit manually.
+Port {{ ssh_port }}
+AddressFamily any
+PermitRootLogin {{ ssh_permit_root_login }}
+PubkeyAuthentication yes
+PasswordAuthentication {{ 'yes' if ssh_password_authentication | bool else 'no' }}
+KbdInteractiveAuthentication no
+UsePAM yes
+X11Forwarding no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2

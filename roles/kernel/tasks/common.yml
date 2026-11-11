@@ -1,0 +1,61 @@
+---
+# ---------------------------------------------------------------------------
+# BBR
+# ---------------------------------------------------------------------------
+- name: Write the BBR sysctl configuration
+  ansible.builtin.copy:
+    dest: "{{ bbr_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      net.core.default_qdisc = fq
+      net.ipv4.tcp_congestion_control = bbr
+
+- name: Load the BBR kernel modules
+  ansible.builtin.command:
+    cmd: "modprobe {{ item }}"
+  loop:
+    - tcp_bbr
+    - sch_fq
+  changed_when: false
+  failed_when: false
+  when: ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+
+- name: Apply the BBR sysctl settings
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ bbr_sysctl_file }}"
+  register: bbr_apply
+  changed_when: false
+  when: ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+
+- name: Explain why BBR was not applied inside a container
+  ansible.builtin.debug:
+    msg: >-
+      BBR is written to {{ bbr_sysctl_file }}, but applying kernel sysctls is skipped
+      inside {{ ansible_virtualization_type }}. Run the playbook on a real host/VM
+      (or load tcp_bbr on the host) for it to take effect.
+  when: ansible_virtualization_type in ['lxc', 'docker', 'podman', 'containerd']
+
+# ---------------------------------------------------------------------------
+# IPv6
+# ---------------------------------------------------------------------------
+- name: Write the IPv6-disable sysctl configuration
+  ansible.builtin.copy:
+    dest: "{{ ipv6_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      net.ipv6.conf.all.disable_ipv6 = 1
+      net.ipv6.conf.default.disable_ipv6 = 1
+      net.ipv6.conf.lo.disable_ipv6 = 1
+
+- name: Apply the IPv6 sysctl settings
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ ipv6_sysctl_file }}"
+  register: ipv6_apply
+  changed_when: false
+  failed_when: false
