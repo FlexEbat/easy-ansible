@@ -8,6 +8,12 @@ sudo_group: "{{ 'wheel' if ansible_facts['os_family'] == 'RedHat' else 'sudo' }}
 ssh_service_name: "{{ 'sshd' if ansible_facts['os_family'] == 'RedHat' else 'ssh' }}"
 firewall_backend: "{{ 'firewalld' if ansible_facts['os_family'] == 'RedHat' else 'ufw' }}"
 docker_repo_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else 'debian' }}"
+# Docker publishes a separate repository for RHEL derivatives. AlmaLinux,
+# Rocky and CentOS Stream use the CentOS repository; RHEL itself uses rhel.
+docker_rhel_repo_flavor: >-
+  {{ 'centos' if ansible_facts['distribution'] in
+     ['AlmaLinux', 'Rocky', 'CentOS', 'CentOS Stream']
+     else 'rhel' }}
 
 # ---------------------------------------------------------------------------
 # Packages
@@ -17,7 +23,6 @@ docker_repo_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' el
 # on the RHEL family).
 base_packages_common:
   - sudo
-  - curl
   - wget
   - git
   - ca-certificates
@@ -25,14 +30,18 @@ base_packages_common:
   - openssh-server
 
 base_packages_debian:
+  - curl
   - openssh-client
   - procps
   - ufw
   - mtr
   - zram-tools
+  - unattended-upgrades
+  - rsyslog
 
 # trippy is not in the RHEL/EPEL repositories and is installed by the base
-# role from an upstream release instead. Ubuntu also does not package it.
+# role from an upstream release instead. Debian 13 ships it; Ubuntu and older
+# Debian releases get the upstream build.
 base_packages_rhel:
   - openssh-clients
   - procps-ng
@@ -42,22 +51,37 @@ base_packages_rhel:
   - dnf-plugins-core
   - mtr
   - zram-generator
+  - dnf-automatic
+  # Provides needs-restarting, used for reboot reporting.
+  - yum-utils
 
 trippy_version: "0.13.0"
 trippy_rpm_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
 trippy_rpm_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
+trippy_rpm_checksum: "sha256:7c845f29d7cc7cc588609949442673b8f4b37b7c0d8142d16305355a48b1b217"
 trippy_tarball_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
-trippy_tarball_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu.tar.gz"
+trippy_tarball_url: >-
+  {{ ('https://github.com/fujiapple852/trippy/releases/download/'
+      ~ trippy_version ~ '/trippy-' ~ trippy_version ~ '-'
+      ~ trippy_tarball_arch ~ '-unknown-linux-gnu.tar.gz') }}
+trippy_tarball_checksum: >-
+  {{ 'sha256:c4245db59d3251df3c3045752d931afbed00b97896adeb93be62bf0bf3933f09'
+     if trippy_tarball_arch == 'x86_64'
+     else 'sha256:0afa3fc574066ff0d91d9e81ec0da012822c83bb39f691f52b562f9b6bbdaae3' }}
 trippy_extract_dir: "/tmp/trippy-{{ trippy_version }}"
 trippy_tarball_member: "trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu/trip"
 trippy_deb_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy_x86_64-unknown-linux-gnu_{{ trippy_version }}_amd64.deb"
+trippy_deb_checksum: "sha256:8fe6e4677399ab5b7b2e75925b913b922ffa3785875b04588a8eca8270349007"
+trippy_deb_path: "/tmp/trippy_{{ trippy_version }}_amd64.deb"
+trippy_tarball_path: "/tmp/trippy-{{ trippy_version }}.tar.gz"
 
 # ---------------------------------------------------------------------------
 # Admin user / sudo
 # ---------------------------------------------------------------------------
-# $USER of the invoking user is used by default. Override with:
+# Default to the account Ansible connects with. This is correct for both local
+# and remote runs; the control node's $USER is not used. Override with:
 #   ansible-playbook site.yml -e admin_user=alice
-admin_user: "{{ lookup('env', 'SUDO_USER') or lookup('env', 'USER') or ansible_user_id }}"
+admin_user: "{{ ansible_user | default(ansible_user_id | default('root'), true) }}"
 # "sudo" on Debian/Ubuntu, "wheel" on the RHEL family.
 admin_user_groups:
   - "{{ sudo_group }}"
@@ -77,6 +101,17 @@ ssh_port_state_file: /etc/ansible-ssh-port
 ssh_permit_root_login: prohibit-password
 ssh_password_authentication: false
 ssh_key_type: ed25519
+# Public keys copied to the admin user's authorized_keys from the control node.
+# Supply them for remote hosts: ssh_key_fetch is not needed and no private key
+# is left on the server unless ssh_generate_key is enabled.
+ssh_authorized_keys: []
+# Generate a server-side key pair for admin_user (authorized automatically).
+# Set to false when ssh_authorized_keys already contains your key.
+ssh_generate_key: true
+# Additional accounts allowed to log in (admin_user is always included).
+ssh_allow_users: []
+ssh_agent_forwarding: false
+ssh_log_level: VERBOSE
 # Empty list = allow the new SSH port from any source.
 # Change to e.g. ["10.0.0.0/8", "192.168.0.0/16"] to restrict access further.
 # Port 22 is always explicitly denied.
@@ -91,11 +126,31 @@ ssh_key_fetch_dir: "{{ playbook_dir }}/artifacts"
 ufw_logging: low
 # Empty = use the firewalld default zone. Set explicitly to override.
 firewalld_zone: ""
+# Additional ports to open (for example services published by Docker).
+# Each entry is a mapping. "from" is optional and defaults to any source.
+# Example:
+# firewall_allowed_ports:
+#   - port: 80
+#     proto: tcp
+#   - port: 443
+#     proto: tcp
+#     from: 10.0.0.0/8
+firewall_allowed_ports: []
 
 # ---------------------------------------------------------------------------
-# Kernel: BBR / IPv6 / zram
+# Automatic security updates
+# ---------------------------------------------------------------------------
+# Debian/Ubuntu: unattended-upgrades. RHEL family: dnf-automatic.
+auto_updates_enabled: true
+apt_auto_upgrades_config: /etc/apt/apt.conf.d/20auto-upgrades
+dnf_automatic_config: /etc/dnf/automatic.conf
+dnf_automatic_timer: dnf-automatic.timer
+
+# ---------------------------------------------------------------------------
+# Kernel: BBR / IPv6 / hardening / zram
 # ---------------------------------------------------------------------------
 bbr_sysctl_file: /etc/sysctl.d/99-bbr.conf
+sysctl_hardening_file: /etc/sysctl.d/99-hardening.conf
 ipv6_sysctl_file: /etc/sysctl.d/99-disable-ipv6.conf
 ipv6_grub_dropin: /etc/default/grub.d/99-disable-ipv6.cfg
 
@@ -109,12 +164,16 @@ zram_generator_service: systemd-zram-setup@zram0.service
 # ---------------------------------------------------------------------------
 # CrowdSec
 # ---------------------------------------------------------------------------
-# Debian/Ubuntu ship CrowdSec in the distribution repositories. The RHEL
-# family does not, so the official CrowdSec packagecloud repository is used
-# there.
+# Debian 13 and Ubuntu 24.04 ship CrowdSec in the distribution repositories.
+# The RHEL family does not, so the official CrowdSec packagecloud repository
+# is used there.
 crowdsec_packages_debian:
   - crowdsec
   - crowdsec-firewall-bouncer
+  # The bouncer runs in iptables mode on UFW hosts and needs ipset. The Debian
+  # package depends on "nftables | ipset"; Ubuntu satisfies it with nftables,
+  # so install ipset explicitly.
+  - ipset
 # packagecloud publishes the bouncer split by backend; the RHEL family uses
 # the nftables variant (firewalld is nftables-based).
 crowdsec_packages_rhel:
@@ -123,11 +182,27 @@ crowdsec_packages_rhel:
 crowdsec_rhel_repo_file: /etc/yum.repos.d/crowdsec_crowdsec.repo
 crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/$releasever/$basearch"
 crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+# UFW uses the iptables backend; firewalld is nftables-based.
+crowdsec_bouncer_mode: "{{ 'nftables' if firewall_backend == 'firewalld' else 'iptables' }}"
+crowdsec_collections_required:
+  - crowdsecurity/linux
+  - crowdsecurity/sshd
+crowdsec_whitelist_path: /etc/crowdsec/parsers/s02-enrich/ansible-whitelist.yaml
+# Addresses that must never be banned. Loopback and the host's own address
+# are added automatically; add management IPs or VPN networks here.
+crowdsec_whitelist_ips: []
+crowdsec_whitelist_cidrs: []
 
 # ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
 docker_service_enabled: true
+docker_daemon_config: /etc/docker/daemon.json
+docker_log_max_size: 10m
+docker_log_max_file: "3"
+docker_live_restore: true
+# Add admin_user to the docker group (requires a new login to take effect).
+docker_add_admin_to_group: true
 # Packages from the distribution that conflict with Docker CE.
 docker_conflicting_packages_debian:
   - docker.io

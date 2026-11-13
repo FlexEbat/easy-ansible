@@ -1,0 +1,19 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Wait for the container connection
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+
+    - name: Wait for systemd to finish booting  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: systemctl is-system-running --wait
+      register: systemd_state
+      changed_when: false
+      failed_when: systemd_state.stdout not in ['running', 'degraded']
+
+    - name: Show the systemd state
+      ansible.builtin.debug:
+        msg: "systemd state: {{ systemd_state.stdout | default('unknown') }}"

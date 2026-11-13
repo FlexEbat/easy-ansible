@@ -1,0 +1,15 @@
+---
+# ansible-lint configuration.
+profile: basic
+
+# Role-local register/fact names are acceptable; prefixing all of them would
+# add noise without improving clarity.
+skip_list:
+  - var-naming[no-role-prefix]
+
+exclude_paths:
+  - .ansible/
+  - .cache/
+  - .git/
+  - artifacts/
+  - molecule/*/ephemeral/

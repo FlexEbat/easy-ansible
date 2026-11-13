@@ -3,7 +3,7 @@
 # Bootstrap Ansible on a fresh Debian/Ubuntu or RHEL-family target and run the
 # playbook.
 # Usage:
-#   ./run.sh                         # uses $USER / SUDO_USER
+#   ./run.sh                         # admin_user defaults to ansible_user
 #   ./run.sh -e admin_user=alice     # explicit admin user
 #   ./run.sh --check                 # dry run
 

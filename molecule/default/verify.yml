@@ -1,0 +1,11 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Run the post-install verification
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../../verify.sh"
+      register: verification
+      changed_when: false
+      failed_when: verification.rc != 0

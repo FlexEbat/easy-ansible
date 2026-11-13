@@ -1,0 +1,30 @@
+---
+# The SSH port may have just changed. Point Ansible at the persisted port and
+# rebuild the connection before the remaining roles run. For the local
+# connection there is no network session to move, so the reset is skipped.
+- name: Check whether Ansible must move to the new SSH port
+  ansible.builtin.set_fact:
+    ssh_port_needs_reconnect: >-
+      {{ (ansible_port | default(22) | int) != (ssh_port | int) }}
+
+- name: Point Ansible at the configured SSH port
+  ansible.builtin.set_fact:
+    ansible_port: "{{ ssh_port }}"
+  when: ssh_port_needs_reconnect | bool
+
+- name: Reset the SSH connection so it is rebuilt on the new port
+  ansible.builtin.meta: reset_connection
+
+- name: Wait for SSH on the new port
+  ansible.builtin.wait_for_connection:
+    delay: 2
+    timeout: 60
+  when:
+    - ssh_port_needs_reconnect | bool
+    - ansible_connection | default('ssh') != 'local'
+
+- name: Explain the connection change
+  ansible.builtin.debug:
+    msg: >-
+      Ansible now uses SSH port {{ ssh_port }}
+      {{ '(connection rebuilt)' if ssh_port_needs_reconnect | bool else '(port was already configured)' }}.

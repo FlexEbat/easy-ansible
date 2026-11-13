@@ -8,22 +8,52 @@
     - name: Assert that the operating system is supported
       ansible.builtin.assert:
         that:
-          - ansible_facts['os_family'] in ['Debian', 'RedHat']
-          - ansible_facts['distribution'] in ['Debian', 'Ubuntu', 'RedHat', 'CentOS', 'Rocky', 'AlmaLinux', 'OracleLinux']
+          - >-
+            (ansible_facts['distribution'] == 'Debian'
+             and ansible_facts['distribution_major_version'] | int >= 13)
+            or (ansible_facts['distribution'] == 'Ubuntu'
+                and ansible_facts['distribution_version'] is version('24.04', '>='))
+            or (ansible_facts['os_family'] == 'RedHat'
+                and ansible_facts['distribution_major_version'] | int >= 8)
         fail_msg: >-
           Unsupported operating system: {{ ansible_facts['distribution'] }}
           {{ ansible_facts['distribution_version'] }} (family
-          {{ ansible_facts['os_family'] }}). Supported families are
-          Debian/Ubuntu and RHEL (RedHat, CentOS, Rocky, AlmaLinux, Oracle Linux).
+          {{ ansible_facts['os_family'] }}). Supported: Debian 13+,
+          Ubuntu 24.04+, RHEL 8+ (RedHat, CentOS, Rocky, AlmaLinux,
+          Oracle Linux).
         success_msg: >-
           Supported operating system: {{ ansible_facts['distribution'] }}
           {{ ansible_facts['distribution_version'] }}.
+
+    - name: Assert that an admin user is defined
+      ansible.builtin.assert:
+        that:
+          - admin_user is defined
+          - admin_user | length > 0
+        fail_msg: >-
+          admin_user resolved to an empty value. Pass -e admin_user=<name>.
+
+    - name: Assert that extra firewall ports have a port number
+      ansible.builtin.assert:
+        that:
+          - item.port is defined
+        fail_msg: >-
+          firewall_allowed_ports entries must be mappings with a "port" key;
+          got {{ item | to_json }}.
+      loop: "{{ firewall_allowed_ports }}"
+
+    - name: Initialize the reboot-required flag
+      ansible.builtin.set_fact:
+        reboot_required: false
 
   roles:
     - base
     - admin_user
     - ssh
     - firewall
+    # The firewall role applies the sshd restart. Move Ansible to the new
+    # port before any further task tries to use the old connection.
+    - reconnect
     - crowdsec
     - kernel
     - docker
@@ -65,11 +95,20 @@
             'admin_home': admin_home,
             'sudo_group': sudo_group,
             'firewall_backend': firewall_backend,
+            'firewall_allowed_ports': firewall_allowed_ports | map(attribute='port') | map('int') | list,
             'ssh_port': ssh_port | int,
+            'ssh_generate_key': ssh_generate_key | bool,
+            'ssh_allow_users': ssh_effective_allow_users,
             'ssh_private_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type,
             'ssh_public_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type ~ '.pub',
             'ssh_port_file': ssh_port_state_file,
-            'ssh_allowed_from': (ssh_allowed_cidrs if ssh_allowed_cidrs | length > 0 else ['any'])
+            'ssh_allowed_from': (ssh_allowed_cidrs if ssh_allowed_cidrs | length > 0 else ['any']),
+            'crowdsec_bouncer_mode': crowdsec_bouncer_mode,
+            'crowdsec_bouncer_config': crowdsec_bouncer_config,
+            'auto_updates_enabled': auto_updates_enabled | bool,
+            'docker_daemon_config': docker_daemon_config,
+            'docker_add_admin_to_group': docker_add_admin_to_group | bool,
+            'reboot_required': reboot_required | bool
           } | to_nice_json }}
 
     - name: Show setup summary
@@ -78,7 +117,18 @@
           - "OS:               {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
           - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }})"
           - "SSH port:         {{ ssh_port }}"
+          - "SSH generated key:{{ ssh_generate_key }}"
           - "SSH private key:  {{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
           - "SSH public key:   {{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
           - "Firewall:         {{ firewall_backend }}"
+          - "Extra open ports: {{ firewall_allowed_ports | map(attribute='port') | list | join(', ') if firewall_allowed_ports | length > 0 else 'none' }}"
+          - "Auto updates:     {{ auto_updates_enabled }}"
+          - "Reboot required:  {{ reboot_required }}"
           - "Summary file:     /etc/ansible-setup-summary.json"
+
+    - name: Warn when the host needs a reboot
+      ansible.builtin.debug:
+        msg: >-
+          A reboot is required to finish applying updates (kernel or core
+          libraries were upgraded). Reboot at a convenient time.
+      when: reboot_required | bool

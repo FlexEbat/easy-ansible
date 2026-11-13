@@ -1,4 +1,42 @@
 ---
+# ---------------------------------------------------------------------------
+# Disable LLMNR/mDNS so systemd-resolved does not expose an extra external
+# TCP/UDP listener (port 5355).
+# ---------------------------------------------------------------------------
+- name: Check whether systemd-resolved is available  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: systemctl list-unit-files systemd-resolved.service
+  register: resolved_unit
+  changed_when: false
+  failed_when: false
+
+- name: Ensure the systemd-resolved drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - resolved_unit.rc == 0
+    - "'systemd-resolved.service' in resolved_unit.stdout"
+
+- name: Disable LLMNR and multicast DNS
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/99-ansible-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      [Resolve]
+      LLMNR=no
+      MulticastDNS=no
+  when:
+    - resolved_unit.rc == 0
+    - "'systemd-resolved.service' in resolved_unit.stdout"
+  notify: Restart systemd-resolved
+
 - name: Apply the Debian/Ubuntu base configuration
   ansible.builtin.include_tasks: debian.yml
   when: is_debian | bool

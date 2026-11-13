@@ -12,6 +12,7 @@
     name: crowdsec
     enabled: true
     state: started
+    daemon_reload: true
 
 - name: Wait for the CrowdSec Local API
   ansible.builtin.command:
@@ -29,39 +30,86 @@
   changed_when: false
   failed_when: false
 
+# An empty response is valid when no bouncer has registered yet.
 - name: Build the list of registered bouncer types
   ansible.builtin.set_fact:
     crowdsec_bouncer_types: >-
       {{
-        (crowdsec_bouncers.stdout | from_json)
+        ((crowdsec_bouncers.stdout | default('[]', true) | from_json) or [])
         | map(attribute='type')
         | list
       }}
   when: crowdsec_bouncers.rc == 0
 
+- name: Check for an existing bouncer override
+  ansible.builtin.stat:
+    path: "{{ crowdsec_bouncer_config }}.local"
+  register: crowdsec_bouncer_local
+
+- name: Read the existing bouncer override
+  ansible.builtin.slurp:
+    src: "{{ crowdsec_bouncer_config }}.local"
+  register: crowdsec_bouncer_local_raw
+  no_log: true
+  when: crowdsec_bouncer_local.stat.exists
+
+- name: Extract the existing bouncer API key
+  ansible.builtin.set_fact:
+    crowdsec_existing_api_key: >-
+      {{ (crowdsec_bouncer_local_raw.content | b64decode
+          | regex_findall('api_key:\s*(\S+)') | first) | default('') }}
+  no_log: true
+  when: crowdsec_bouncer_local.stat.exists
+
 # Most CrowdSec bouncer packages register themselves during installation.
-# If that did not happen (for example because the LAPI was not ready yet),
-# create a bouncer and write its key to the package's .local override file.
+# When that did not happen (the LAPI was not ready while the package was being
+# configured), the package writes a random placeholder key and leaves a
+# pending-registration marker. Create a real bouncer in that case. "already
+# exists" is tolerated so a flaky list call cannot break idempotence.
 - name: Register the CrowdSec firewall bouncer manually
   ansible.builtin.command:
     cmd: cscli bouncers add firewall-bouncer -o raw
   register: crowdsec_bouncer_add
+  no_log: true
   when:
     - crowdsec_bouncers.rc == 0
     - "'crowdsec-firewall-bouncer' not in (crowdsec_bouncer_types | default([]))"
+  failed_when:
+    - crowdsec_bouncer_add.rc != 0
+    - "'already exists' not in (crowdsec_bouncer_add.stderr | default('') | lower)"
+  changed_when: crowdsec_bouncer_add.rc == 0
 
-- name: Write the bouncer API key
+- name: Select the bouncer API key to persist
+  ansible.builtin.set_fact:
+    crowdsec_bouncer_api_key: >-
+      {{ (crowdsec_bouncer_add.stdout | default('') | trim)
+         or (crowdsec_existing_api_key | default('') | trim) }}
+  no_log: true
+
+# The bouncer unit is skipped by systemd while this marker exists. Remove it
+# once a usable bouncer/key pair is available.
+- name: Remove the CrowdSec pending-registration marker
+  ansible.builtin.file:
+    path: /var/lib/crowdsec/pending-registration
+    state: absent
+  when:
+    - crowdsec_bouncers.rc == 0
+    - crowdsec_bouncer_api_key | length > 0
+
+# Rewriting the override on every run keeps the backend mode converged
+# (iptables for UFW, nftables for firewalld) without losing a package-managed
+# API key.
+- name: Write the bouncer API key and backend mode
   ansible.builtin.copy:
     dest: "{{ crowdsec_bouncer_config }}.local"
     content: |
-      mode: nftables
-      api_key: {{ crowdsec_bouncer_add.stdout | trim }}
+      mode: {{ crowdsec_bouncer_mode }}
+      api_key: {{ crowdsec_bouncer_api_key }}
     owner: root
     group: root
     mode: "0600"
-  when:
-    - crowdsec_bouncer_add is changed
-    - crowdsec_bouncer_add.stdout is defined
+  no_log: true
+  when: crowdsec_bouncer_api_key | length > 0
   notify: Restart crowdsec firewall bouncer
 
 - name: Ensure the CrowdSec firewall bouncer is enabled and running
@@ -69,6 +117,7 @@
     name: crowdsec-firewall-bouncer
     enabled: true
     state: started
+    daemon_reload: true
 
 - name: Read installed CrowdSec collections
   ansible.builtin.command:
@@ -90,14 +139,127 @@
 - name: Install missing CrowdSec collections
   ansible.builtin.command:
     cmd: "cscli collections install {{ item }}"
-  loop:
-    - crowdsecurity/linux
-    - crowdsecurity/sshd
+  loop: "{{ crowdsec_collections_required }}"
   register: crowdsec_collection_install
   changed_when: "'already installed' not in crowdsec_collection_install.stdout"
+  notify: Restart crowdsec
   when:
     - crowdsec_collections.rc == 0
     - item not in (crowdsec_collection_names | default([]))
+
+- name: Read installed CrowdSec parsers
+  ansible.builtin.command:
+    cmd: cscli parsers list -o json
+  register: crowdsec_parsers
+  changed_when: false
+  failed_when: false
+
+- name: Build the list of installed CrowdSec parsers
+  ansible.builtin.set_fact:
+    crowdsec_parser_names: >-
+      {{
+        (crowdsec_parsers.stdout | from_json).parsers
+        | map(attribute='name')
+        | list
+      }}
+  when: crowdsec_parsers.rc == 0
+
+# The whitelist parser ships with CrowdSec, but install it explicitly in case
+# a minimal installation omitted it.
+- name: Install the CrowdSec whitelists parser if missing
+  ansible.builtin.command:
+    cmd: cscli parsers install crowdsecurity/whitelists
+  when:
+    - crowdsec_parsers.rc == 0
+    - "'crowdsecurity/whitelists' not in (crowdsec_parser_names | default([]))"
+  changed_when: true
+  notify: Restart crowdsec
+
+# ---------------------------------------------------------------------------
+# Whitelist the host itself, its local network and any explicit management
+# addresses so CrowdSec cannot lock the operator out.
+# ---------------------------------------------------------------------------
+- name: Build the CrowdSec whitelist entries
+  ansible.builtin.set_fact:
+    crowdsec_whitelist_effective_ips: >-
+      {{ (['127.0.0.1', '::1'] + crowdsec_whitelist_ips
+          + ([ansible_facts['default_ipv4']['address']]
+             if ansible_facts.get('default_ipv4') else [])) | unique }}
+    crowdsec_whitelist_effective_cidrs: >-
+      {{ (crowdsec_whitelist_cidrs
+          + ([ansible_facts['default_ipv4']['network'] ~ '/' ~ ansible_facts['default_ipv4']['prefix']]
+             if ansible_facts.get('default_ipv4') else [])) | unique }}
+
+- name: Ensure the CrowdSec whitelist directory exists
+  ansible.builtin.file:
+    path: "{{ crowdsec_whitelist_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the CrowdSec whitelist
+  ansible.builtin.copy:
+    dest: "{{ crowdsec_whitelist_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {{ {
+        'name': 'crowdsecurity/ansible-whitelist',
+        'description': 'Managed by Ansible',
+        'whitelist': {
+          'reason': 'Local host and configured management networks',
+          'ip': crowdsec_whitelist_effective_ips,
+          'cidr': crowdsec_whitelist_effective_cidrs
+        }
+      } | to_nice_yaml(indent=2) }}
+  notify: Restart crowdsec
+
+- name: Apply queued CrowdSec configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the CrowdSec Local API after reload
+  ansible.builtin.command:
+    cmd: cscli lapi status
+  register: crowdsec_lapi_reload
+  changed_when: false
+  retries: 15
+  delay: 2
+  until: crowdsec_lapi_reload.rc == 0
+
+- name: Check CrowdSec metrics
+  ansible.builtin.command:
+    cmd: cscli metrics
+  register: crowdsec_metrics
+  changed_when: false
+  failed_when: false
+
+# Ubuntu 24.04 ships CrowdSec 1.4.6, where "cscli metrics" can crash while
+# decoding the Prometheus payload. The endpoint itself is healthy, so use it
+# as a fallback to prove that the datasources are being read.
+- name: Read the CrowdSec metrics endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:6060/metrics"
+    return_content: true
+  register: crowdsec_metrics_endpoint
+  changed_when: false
+  failed_when: false
+  retries: 10
+  delay: 2
+  until: crowdsec_metrics_endpoint.status | default(0) == 200
+
+- name: Assert that CrowdSec can read its datasources
+  ansible.builtin.assert:
+    that:
+      - >-
+        crowdsec_metrics.rc == 0
+        or (crowdsec_metrics_endpoint.status | default(0) == 200
+            and 'cs_filesource_hits_total' in (crowdsec_metrics_endpoint.content | default('')))
+    fail_msg: >-
+      CrowdSec metrics are unavailable. On Debian/Ubuntu check that rsyslog is
+      running and that /var/log/auth.log exists; CrowdSec's sshd parser reads
+      that file.
 
 - name: Show CrowdSec collections
   ansible.builtin.debug:

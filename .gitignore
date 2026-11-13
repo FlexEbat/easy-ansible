@@ -1,2 +1,5 @@
 artifacts/
 *.retry
+.ansible/
+.cache/
+__pycache__/

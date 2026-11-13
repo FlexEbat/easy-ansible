@@ -1,13 +1,17 @@
 # Managed by Ansible. Do not edit manually.
 Port {{ ssh_port }}
-AddressFamily any
-PermitRootLogin {{ ssh_permit_root_login }}
+AddressFamily inet
+PermitRootLogin {{ 'no' if admin_user != 'root' else ssh_permit_root_login }}
 PubkeyAuthentication yes
 PasswordAuthentication {{ 'yes' if ssh_password_authentication | bool else 'no' }}
-KbdInteractiveAuthentication no
+{{ ssh_kbd_directive }} no
+PermitEmptyPasswords no
+AllowAgentForwarding {{ 'yes' if ssh_agent_forwarding | bool else 'no' }}
+AllowUsers {{ ssh_effective_allow_users | join(' ') }}
 UsePAM yes
 X11Forwarding no
 MaxAuthTries 3
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
+LogLevel {{ ssh_log_level }}

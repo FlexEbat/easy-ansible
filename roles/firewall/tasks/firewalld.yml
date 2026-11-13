@@ -4,6 +4,7 @@
     name: firewalld
     enabled: true
     state: started
+    daemon_reload: true
 
 - name: Determine the default firewalld zone
   ansible.builtin.command:
@@ -17,6 +18,41 @@
     firewalld_zone: "{{ firewalld_default_zone.stdout | trim }}"
   when: firewalld_zone | length == 0
 
+# ---------------------------------------------------------------------------
+# Converge the SSH rules. Rich rules for removed source networks must be
+# deleted when ssh_allowed_cidrs changes.
+# ---------------------------------------------------------------------------
+- name: Read the rich rules in the firewalld zone
+  ansible.builtin.command:
+    cmd: "firewall-cmd --zone={{ firewalld_zone }} --list-rich-rules"
+  register: firewalld_rich_rules
+  changed_when: false
+
+- name: Identify source-restricted rules for the SSH port
+  ansible.builtin.set_fact:
+    firewalld_ssh_rich_rules: >-
+      {{ firewalld_rich_rules.stdout_lines
+         | select('search', 'port port="' ~ ssh_port ~ '"')
+         | list }}
+
+- name: Identify stale source-restricted SSH rules
+  ansible.builtin.set_fact:
+    firewalld_stale_ssh_rules: >-
+      {{ firewalld_ssh_rich_rules
+         if ssh_allowed_cidrs | length == 0
+         else (firewalld_ssh_rich_rules
+               | reject('search', 'source address="(' ~ (ssh_allowed_cidrs | map('regex_escape') | join('|')) ~ ')"')
+               | list) }}
+
+- name: Remove stale source-restricted SSH rules
+  ansible.posix.firewalld:
+    rich_rule: "{{ item }}"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: disabled
+  loop: "{{ firewalld_stale_ssh_rules }}"
+
 - name: Allow SSH on the new random port
   ansible.posix.firewalld:
     port: "{{ ssh_port }}/tcp"
@@ -26,8 +62,6 @@
     state: enabled
   when: (ssh_allowed_cidrs | length) == 0
 
-# Source-restricted access uses rich rules instead of opening the port to the
-# whole zone, and makes sure a previously opened port does not stay open.
 - name: Restrict SSH to the configured source networks
   ansible.posix.firewalld:
     rich_rule: >-
@@ -65,7 +99,27 @@
     immediate: true
     state: disabled
 
-- name: Reload firewalld
-  ansible.builtin.command:
-    cmd: firewall-cmd --reload
-  changed_when: false
+# ---------------------------------------------------------------------------
+# Additional ports (services published by Docker, web servers, ...)
+# ---------------------------------------------------------------------------
+- name: Allow additional ports from any source
+  ansible.posix.firewalld:
+    port: "{{ item.port }}/{{ item.proto | default('tcp') }}"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ firewall_allowed_ports }}"
+  when: (item.from | default('any')) == 'any'
+
+- name: Allow additional ports from restricted sources
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item.from }}"
+      port port="{{ item.port }}" protocol="{{ item.proto | default('tcp') }}" accept
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ firewall_allowed_ports }}"
+  when: (item.from | default('any')) != 'any'

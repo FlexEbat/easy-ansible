@@ -23,18 +23,17 @@
   register: ipv6_grub_config
 
 - name: Check whether update-grub is available
-  ansible.builtin.command:
-    cmd: command -v update-grub
+  ansible.builtin.stat:
+    path: /usr/sbin/update-grub
   register: update_grub
-  changed_when: false
-  failed_when: false
 
 - name: Regenerate the GRUB configuration
   ansible.builtin.command:
-    cmd: update-grub
+    cmd: /usr/sbin/update-grub
   when:
     - ipv6_grub_config is changed
-    - update_grub.rc == 0
+    - update_grub.stat.exists
+  changed_when: true
 
 # ---------------------------------------------------------------------------
 # zram (zram-tools)
@@ -55,20 +54,28 @@
   changed_when: false
   failed_when: false
   check_mode: false
+  when: ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
 
 - name: Check for a zram device
   ansible.builtin.stat:
     path: /dev/zram0
   register: zram_device
 
+# Containers must not try to manage zram/swap for the host kernel, even when
+# the module happens to be visible inside the container.
 - name: Remember whether zram is usable on this host
   ansible.builtin.set_fact:
-    zram_usable: "{{ zram_modprobe.rc == 0 or zram_device.stat.exists }}"
+    zram_usable: >-
+      {{ ansible_virtualization_type not in
+         ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+         and ((zram_modprobe.rc | default(1)) == 0
+              or zram_device.stat.exists) }}
 
 - name: Enable the zramswap service
   ansible.builtin.systemd_service:
     name: zramswap
     enabled: "{{ zram_usable }}"
+    daemon_reload: true
 
 - name: Start or restart the zramswap service
   ansible.builtin.systemd_service:
@@ -85,7 +92,8 @@
 - name: Explain why zram was not started
   ansible.builtin.debug:
     msg: >-
-      The zram configuration is in /etc/default/zramswap, but the zram kernel module
-      is not available to this {{ ansible_virtualization_type }} environment.
-      zramswap was left disabled.
+      The zram configuration is in /etc/default/zramswap, but zram is
+      unavailable or cannot be managed inside this
+      {{ ansible_virtualization_type }} environment. zramswap was left
+      disabled.
   when: not zram_usable
