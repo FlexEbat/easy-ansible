@@ -49,36 +49,16 @@
   roles:
     - base
     - admin_user
-    - ssh
     - firewall
-    # The firewall role applies the sshd restart. Move Ansible to the new
-    # port before any further task tries to use the old connection.
-    - reconnect
     - crowdsec
     - kernel
     - docker
 
   post_tasks:
-    # Make sure the sshd restart (and any other queued handler) happens before
-    # the final summary/verification.
+    # Make sure any queued handlers (for example the Docker restart) happen
+    # before the final summary/verification.
     - name: Apply queued handlers
       ansible.builtin.meta: flush_handlers
-
-    # If the play failed after writing the SSH config but before handlers ran,
-    # the next successful run has nothing to notify and sshd would stay on the
-    # old port. Detect that case and restart explicitly.
-    - name: Check whether sshd is listening on the configured port
-      ansible.builtin.command:
-        cmd: "ss -ltnH 'sport = :{{ ssh_port }}'"
-      register: sshd_port_check
-      changed_when: false
-      failed_when: false
-
-    - name: Restart ssh if it is not listening on the configured port
-      ansible.builtin.systemd_service:
-        name: "{{ ssh_service_name }}"
-        state: restarted
-      when: sshd_port_check.stdout | trim == ''
 
     - name: Write setup summary
       ansible.builtin.copy:
@@ -96,13 +76,6 @@
             'sudo_group': sudo_group,
             'firewall_backend': firewall_backend,
             'firewall_allowed_ports': firewall_allowed_ports | map(attribute='port') | map('int') | list,
-            'ssh_port': ssh_port | int,
-            'ssh_generate_key': ssh_generate_key | bool,
-            'ssh_allow_users': ssh_effective_allow_users,
-            'ssh_private_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type,
-            'ssh_public_key': admin_home ~ '/.ssh/id_' ~ ssh_key_type ~ '.pub',
-            'ssh_port_file': ssh_port_state_file,
-            'ssh_allowed_from': (ssh_allowed_cidrs if ssh_allowed_cidrs | length > 0 else ['any']),
             'crowdsec_bouncer_mode': crowdsec_bouncer_mode,
             'crowdsec_bouncer_config': crowdsec_bouncer_config,
             'auto_updates_enabled': auto_updates_enabled | bool,
@@ -116,10 +89,6 @@
         msg:
           - "OS:               {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
           - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }})"
-          - "SSH port:         {{ ssh_port }}"
-          - "SSH generated key:{{ ssh_generate_key }}"
-          - "SSH private key:  {{ admin_home }}/.ssh/id_{{ ssh_key_type }}"
-          - "SSH public key:   {{ admin_home }}/.ssh/id_{{ ssh_key_type }}.pub"
           - "Firewall:         {{ firewall_backend }}"
           - "Extra open ports: {{ firewall_allowed_ports | map(attribute='port') | list | join(', ') if firewall_allowed_ports | length > 0 else 'none' }}"
           - "Auto updates:     {{ auto_updates_enabled }}"

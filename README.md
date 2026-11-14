@@ -3,15 +3,16 @@
 Ansible-плейбук приводит чистый сервер (или LXC/Docker-контейнер) к состоянию:
 
 1. Определяет ОС и обновляет все пакеты (`apt dist-upgrade` или `dnf upgrade`).
-2. Переносит SSH на случайный порт, закрывает порт 22, запрещает вход по
-   паролю, добавляет ваш публичный ключ или генерирует `ed25519` на сервере.
-3. Устанавливает `sudo`, `curl`/`curl-minimal`, `wget`, `mtr`, `trippy`, `git`,
+2. Устанавливает `sudo`, `curl`/`curl-minimal`, `wget`, `mtr`, `trippy`, `git`,
    `zram`, `CrowdSec`, официальный `Docker CE` и автообновления.
-4. Настраивает firewall, CrowdSec (+ firewall bouncer), BBR, отключение IPv6,
+3. Настраивает firewall, CrowdSec (+ firewall bouncer), BBR, отключение IPv6,
    сетевые sysctl и zram.
-5. Проверяет, что `admin_user` есть в группе администраторов; если нет —
+4. Проверяет, что `admin_user` есть в группе администраторов; если нет —
    создаёт пользователя и настраивает sudo.
-6. Сообщает, требуется ли перезагрузка после обновления.
+5. Сообщает, требуется ли перезагрузка после обновления.
+
+SSH плейбук **не трогает**: `sshd` остаётся с конфигурацией дистрибутива —
+порт 22 и вход по логину и паролю. Firewall открывает `22/tcp` явно.
 
 ## Поддерживаемые ОС
 
@@ -42,9 +43,7 @@ Debian 12 и Ubuntu 22.04 больше не поддерживаются: для
 └── roles/
     ├── base/          # обновление, пакеты, автообновления, trippy
     ├── admin_user/    # admin_user, группа sudo/wheel, sudoers
-    ├── ssh/           # порт, sshd_config, ключи, SELinux
-    ├── firewall/      # UFW или firewalld
-    ├── reconnect/     # переподключение после смены SSH-порта
+    ├── firewall/      # UFW или firewalld (SSH на порту 22 разрешён)
     ├── crowdsec/      # сервис, LAPI, collections, bouncer, whitelist
     ├── kernel/        # BBR, IPv6, sysctl hardening, zram
     └── docker/        # официальный Docker CE и daemon.json
@@ -87,7 +86,7 @@ ansible-playbook -i inventory.ini site.yml -e admin_user=admin
 подключается к хосту), а не `$USER` на control node. Это важно при запуске с
 ноутбука: без `-e admin_user=...` будет выбран именно удалённый пользователь.
 
-## Где лежит ключ, порт и итоги
+## Итоги запуска
 
 После запуска на сервере есть файл `/etc/ansible-setup-summary.json`:
 
@@ -104,45 +103,12 @@ ansible-playbook -i inventory.ini site.yml -e admin_user=admin
   "firewall_backend": "ufw",
   "os_family": "Debian",
   "reboot_required": false,
-  "ssh_allowed_from": ["any"],
-  "ssh_generate_key": true,
-  "ssh_port": 22911,
-  "ssh_port_file": "/etc/ansible-ssh-port",
-  "ssh_private_key": "/home/labadmin/.ssh/id_ed25519",
-  "ssh_public_key": "/home/labadmin/.ssh/id_ed25519.pub",
   "sudo_group": "sudo"
 }
 ```
 
-Плейбук также печатает эти значения в задаче `Show setup summary`. Порт
-сохраняется в `/etc/ansible-ssh-port`, поэтому повторные запуски не меняют его
-и остаются идемпотентными.
-
-> После первого запуска SSH уже слушает новый порт. Добавьте его в inventory
-> для следующих запусков:
-> `prod-01 ansible_host=203.0.113.10 ansible_user=admin ansible_port=<порт>`.
-> Host key checking в `ansible.cfg` не отключён; заранее добавьте ключ хоста в
-> `known_hosts` (`ssh-keyscan -p <порт> <host> >> ~/.ssh/known_hosts`).
-
-Чтобы забрать приватный ключ в LXC и проверить вход:
-
-```bash
-PORT=$(lxc exec linux-lab -- cat /etc/ansible-ssh-port)
-lxc file pull linux-lab/home/labadmin/.ssh/id_ed25519 ./id_ed25519
-chmod 600 ./id_ed25519
-
-ssh -i ./id_ed25519 -p "$PORT" labadmin@10.54.26.247
-```
-
-Для удалённого сервера можно включить автоматическое копирование ключа на
-control node:
-
-```bash
-ansible-playbook site.yml -e ssh_key_fetch=true
-# ключ появится в ./artifacts/<host>_id_ed25519
-```
-
-`artifacts/` добавлен в `.gitignore`.
+Плейбук также печатает эти значения в задаче `Show setup summary`. SSH-состояние
+(порт, ключи) плейбук не меняет и в summary не пишет.
 
 ## Переменные
 
@@ -152,35 +118,18 @@ ansible-playbook site.yml -e ssh_key_fetch=true
 |---|---|---|
 | `admin_user` | `ansible_user` | пользователь, которого проверяем/добавляем в sudo/wheel |
 | `admin_user_sudo_nopasswd` | `true` | беспарольный sudo для key-only пользователя |
-| `ssh_port_min` / `ssh_port_max` | `20000` / `32000` | диапазон случайного порта |
-| `ssh_password_authentication` | `false` | вход по паролю |
-| `ssh_permit_root_login` | `prohibit-password` | root только по ключу (если `admin_user=root`) |
-| `ssh_authorized_keys` | `[]` | публичные ключи с control node для `admin_user` |
-| `ssh_generate_key` | `true` | генерировать ключ на сервере, если своих ключей нет |
-| `ssh_allow_users` | `[]` | дополнительные пользователи в `AllowUsers` |
-| `ssh_agent_forwarding` | `false` | разрешить agent forwarding |
-| `ssh_allowed_cidrs` | `[]` | `[]` = новый порт открыт всем; иначе только подсети |
-| `ssh_key_fetch` | `false` | копировать приватный ключ на control node |
 | `firewall_allowed_ports` | `[]` | дополнительные порты (например, 80/443) |
 | `auto_updates_enabled` | `true` | unattended-upgrades / dnf-automatic |
 | `zram_percent` | `25` | сколько RAM отдать под zram |
 | `zram_algorithm` | `zstd` | алгоритм сжатия zram |
 | `zram_priority` | `100` | приоритет swap для zram |
 | `crowdsec_whitelist_ips` | `[]` | IP, которые CrowdSec никогда не заблокирует |
-| `crowdsec_whitelist_cidrs` | `[]` | подсети-исключения CrowdSec |
+| `crowdsec_whitelist_cidrs` | `["192.168.1.0/24"]` | подсети-исключения CrowdSec (по умолчанию management-LAN этого хоста, чтобы опечатки в пароле не привели к бану) |
 | `docker_service_enabled` | `true` | включает/выключает Docker |
 | `docker_add_admin_to_group` | `true` | добавить `admin_user` в группу `docker` |
 | `docker_log_max_size` | `10m` | ротация логов Docker |
 | `docker_log_max_file` | `3` | число файлов ротации |
 | `docker_live_restore` | `true` | не останавливать контейнеры при рестарте daemon |
-
-Пример ограничения SSH только локальными сетями:
-
-```bash
-ansible-playbook site.yml \
-  -e admin_user=alice \
-  -e '{"ssh_allowed_cidrs":["10.0.0.0/8","192.168.0.0/16"]}'
-```
 
 Пример дополнительных портов:
 
@@ -210,41 +159,18 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 
 ### SSH
 
-- `Port <random>` в `/etc/ssh/sshd_config.d/00-ansible-hardening.conf`;
-  конфликтующие `Port` в основном конфиге и других drop-in файлах
-  комментируются.
-- `AddressFamily inet`, `PasswordAuthentication no`, `PermitEmptyPasswords no`,
-  `AllowAgentForwarding no`, `X11Forwarding no`, `MaxAuthTries 3`,
-  `LoginGraceTime 30`, `LogLevel VERBOSE`.
-- `KbdInteractiveAuthentication` (OpenSSH 8.7+) или
-  `ChallengeResponseAuthentication` (старее) выключается автоматически.
-- `PermitRootLogin no`, если `admin_user != root`; иначе
-  `prohibit-password`.
-- `AllowUsers` всегда содержит `admin_user` плюс `ssh_allow_users`.
-- Публичные ключи из `ssh_authorized_keys` добавляются в
-  `~/.ssh/authorized_keys`. Если ключей нет и `ssh_generate_key=true`,
-  генерируется `ed25519`.
-- Перед отключением паролей плейбук проверяет, что у `admin_user` есть хотя бы
-  один авторизованный ключ, и падает до записи конфигурации иначе.
-- На RHEL с SELinux новый порт добавляется в `ssh_port_t` через
-  `semanage`/`community.general.seport`.
-- На Ubuntu 22.10+/24.04 отключается `ssh.socket`, иначе socket activation
-  продолжает слушать старый порт.
-- После смены порта роль `reconnect` делает
-  `set_fact: ansible_port=<новый>`, `meta: reset_connection` и
-  `wait_for_connection` (кроме `local`/не-SSH подключений).
-- Конфиг проверяется через `sshd -t` до перезапуска.
+Плейбук не изменяет конфигурацию `sshd` — она остаётся такой, как в
+дистрибутиве: порт 22, вход по логину и паролю включён. Роль `base` только
+гарантирует, что `openssh-server` установлен и сервис запущен, а firewall
+открывает `22/tcp`. Существующие файлы в `/etc/ssh/sshd_config.d/` не
+изменяются и не удаляются.
 
 ### Firewall
 
 - Debian/Ubuntu: UFW, default incoming `deny`, outgoing `allow`, routed `deny`.
-  Новый SSH-порт разрешён; `22/tcp` явно запрещён.
-- RHEL: firewalld, зона по умолчанию или `firewalld_zone`. Новый SSH-порт
-  открывается, сервис `ssh` и `22/tcp` удаляются.
-- Если задан `ssh_allowed_cidrs`, вместо открытого порта создаются правила
-  только для указанных source. Список приводится к целевому состоянию: при
-  переходе `[]` ↔ список и при удалении подсети лишние правила удаляются
-  (UFW и firewalld rich rules).
+  `22/tcp` разрешён явно (SSH на порту по умолчанию).
+- RHEL: firewalld, зона по умолчанию или `firewalld_zone`; включается сервис
+  `ssh`.
 - `firewall_allowed_ports` добавляет произвольные порты; поле `from`
   ограничивает источник.
 
@@ -322,11 +248,8 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 `verify.sh` определяет ОС и проверяет:
 
 - установленные пакеты (apt/rpm; `curl-minimal` засчитывается как `curl`);
-- случайный порт, эффективный конфиг `sshd -T`, фактический listen через `ss`;
-- наличие ключа, права `600`, владельца и наличие ключа в `authorized_keys`;
-- отключение паролей, пустых паролей, agent forwarding и root-логина;
-- `AddressFamily inet`, `LogLevel VERBOSE`, `AllowUsers`;
-- firewall: UFW или firewalld (active, новый порт разрешён, 22 закрыт,
+- SSH: `sshd` слушает порт 22 и разрешает вход по паролю;
+- firewall: UFW или firewalld (active, порт 22 разрешён,
   `firewall_allowed_ports` открыты);
 - active `crowdsec` и `crowdsec-firewall-bouncer`, LAPI, метрики, коллекцию
   `sshd`, парсер whitelists, зарегистрированный bouncer и его режим;
@@ -336,14 +259,15 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - конфиг zram и активный сервис (на не-контейнере);
 - Docker CE service, ответ daemon, `daemon.json` и доступ к сокету;
 - членство в sudo/wheel и работу `sudo -n`;
-- отсутствие неожиданных внешних TCP-listener'ов: разрешены только SSH-порт,
+- отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт 22,
   loopback и `firewall_allowed_ports`;
 - необходимость перезагрузки.
 
-Запуск:
+Запуск (нужны root-права — скрипт читает `sshd -T`, `ufw status` и файлы
+только root):
 
 ```bash
-./verify.sh
+sudo ./verify.sh
 ```
 
 При успехе скрипт завершается с кодом 0 и печатает `passed/failed/skipped`.
@@ -379,9 +303,12 @@ GitHub Actions (`.github/workflows/ci.yml`) запускает `yamllint`,
 
 ## Безопасность и ограничения
 
-- Порт 22 закрывается, вход по паролю выключается, остаётся только ключ.
-  Плейбук не отключает пароли, пока не убедится, что ключ реально добавлен.
-- Храните приватный ключ с правами `600` и не коммитьте `artifacts/`.
+- SSH намеренно оставлен в конфигурации дистрибутива: порт 22, вход по логину
+  и паролю включён. Это осознанный компромисс для удобства доступа; для
+  продакшена настройте ключи и отключение паролей самостоятельно.
+- CrowdSec не банит адреса из `crowdsec_whitelist_cidrs`; по умолчанию в
+  списке management-LAN хоста, чтобы опечатки в пароле не привели к блокировке
+  вашего IP.
 - Docker публикует порты через свои iptables/nftables-правила в обход
   UFW/firewalld. Если контейнеры публикуют порты, ограничивайте их отдельно
   (bind на `127.0.0.1` или правила Docker/host).

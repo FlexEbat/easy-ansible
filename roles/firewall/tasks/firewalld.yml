@@ -19,85 +19,17 @@
   when: firewalld_zone | length == 0
 
 # ---------------------------------------------------------------------------
-# Converge the SSH rules. Rich rules for removed source networks must be
-# deleted when ssh_allowed_cidrs changes.
+# SSH stays on its default port; firewalld already ships an "ssh" service
+# definition for it. firewalld denies unmatched incoming traffic, so an
+# explicit allow is required.
 # ---------------------------------------------------------------------------
-- name: Read the rich rules in the firewalld zone
-  ansible.builtin.command:
-    cmd: "firewall-cmd --zone={{ firewalld_zone }} --list-rich-rules"
-  register: firewalld_rich_rules
-  changed_when: false
-
-- name: Identify source-restricted rules for the SSH port
-  ansible.builtin.set_fact:
-    firewalld_ssh_rich_rules: >-
-      {{ firewalld_rich_rules.stdout_lines
-         | select('search', 'port port="' ~ ssh_port ~ '"')
-         | list }}
-
-- name: Identify stale source-restricted SSH rules
-  ansible.builtin.set_fact:
-    firewalld_stale_ssh_rules: >-
-      {{ firewalld_ssh_rich_rules
-         if ssh_allowed_cidrs | length == 0
-         else (firewalld_ssh_rich_rules
-               | reject('search', 'source address="(' ~ (ssh_allowed_cidrs | map('regex_escape') | join('|')) ~ ')"')
-               | list) }}
-
-- name: Remove stale source-restricted SSH rules
-  ansible.posix.firewalld:
-    rich_rule: "{{ item }}"
-    zone: "{{ firewalld_zone }}"
-    permanent: true
-    immediate: true
-    state: disabled
-  loop: "{{ firewalld_stale_ssh_rules }}"
-
-- name: Allow SSH on the new random port
-  ansible.posix.firewalld:
-    port: "{{ ssh_port }}/tcp"
-    zone: "{{ firewalld_zone }}"
-    permanent: true
-    immediate: true
-    state: enabled
-  when: (ssh_allowed_cidrs | length) == 0
-
-- name: Restrict SSH to the configured source networks
-  ansible.posix.firewalld:
-    rich_rule: >-
-      rule family="ipv4" source address="{{ item }}"
-      port port="{{ ssh_port }}" protocol="tcp" accept
-    zone: "{{ firewalld_zone }}"
-    permanent: true
-    immediate: true
-    state: enabled
-  loop: "{{ ssh_allowed_cidrs }}"
-  when: (ssh_allowed_cidrs | length) > 0
-
-- name: Close the new SSH port when source restrictions are configured
-  ansible.posix.firewalld:
-    port: "{{ ssh_port }}/tcp"
-    zone: "{{ firewalld_zone }}"
-    permanent: true
-    immediate: true
-    state: disabled
-  when: (ssh_allowed_cidrs | length) > 0
-
-- name: Remove the default SSH service from the zone
+- name: Allow the SSH service in the zone
   ansible.posix.firewalld:
     service: ssh
     zone: "{{ firewalld_zone }}"
     permanent: true
     immediate: true
-    state: disabled
-
-- name: Remove any explicit port 22 rule from the zone
-  ansible.posix.firewalld:
-    port: "22/tcp"
-    zone: "{{ firewalld_zone }}"
-    permanent: true
-    immediate: true
-    state: disabled
+    state: enabled
 
 # ---------------------------------------------------------------------------
 # Additional ports (services published by Docker, web servers, ...)

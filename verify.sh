@@ -51,14 +51,9 @@ pkg_installed() {
 }
 
 ADMIN_USER=$(json_get admin_user)
-SSH_PORT=$(json_get ssh_port)
-SSH_KEY=$(json_get ssh_private_key)
-SSH_PUB=$(json_get ssh_public_key)
-SSH_GENERATE_KEY=$(json_get ssh_generate_key)
 ADMIN_HOME=$(json_get admin_home)
 SUDO_GROUP=$(json_get sudo_group)
 FIREWALL_BACKEND=$(json_get firewall_backend)
-SSH_ALLOWED_FROM=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["ssh_allowed_from"]))' "$SUMMARY")
 FIREWALL_ALLOWED_PORTS=$(python3 -c 'import json,sys; print(" ".join(str(p) for p in json.load(open(sys.argv[1])).get("firewall_allowed_ports", [])))' "$SUMMARY")
 CROWDSEC_BOUNCER_MODE=$(json_get crowdsec_bouncer_mode)
 CROWDSEC_BOUNCER_CONFIG=$(json_get crowdsec_bouncer_config)
@@ -68,27 +63,11 @@ DOCKER_ADD_ADMIN_TO_GROUP=$(json_get docker_add_admin_to_group)
 container_type=$(systemd-detect-virt --container 2>/dev/null || true)
 is_container() { [ -n "$container_type" ] && [ "$container_type" != "none" ]; }
 
-ufw_has_source() {
-  ufw status 2>/dev/null | awk -v p="${SSH_PORT}/tcp" -v src="$1" '
-    {
-      line = $0
-      sub(/#.*/, "", line)
-      sub(/[ \t]+$/, "", line)
-      sub(/[ \t]+\(v6\)$/, "", line)
-      sub(/[ \t]+$/, "", line)
-      n = split(line, fields, /[ \t]+/)
-      if (fields[1] == p && fields[n] == src) found = 1
-    }
-    END { exit !found }'
-}
-
 section "Summary"
 info "os_family=$OS_FAMILY (package manager: $PKG_MANAGER)"
 info "admin_user=$ADMIN_USER"
 info "sudo_group=$SUDO_GROUP"
 info "firewall=$FIREWALL_BACKEND"
-info "ssh_port=$SSH_PORT"
-info "ssh_key_generation=$SSH_GENERATE_KEY"
 info "extra_ports=${FIREWALL_ALLOWED_PORTS:-none}"
 
 section "Packages"
@@ -113,134 +92,25 @@ else
 fi
 
 section "SSH"
-PORT_FILE=$(tr -d '[:space:]' < /etc/ansible-ssh-port 2>/dev/null || true)
-if [ "$PORT_FILE" = "$SSH_PORT" ]; then
-  pass "persisted port matches summary ($SSH_PORT)"
+# SSH is left in its default configuration: port 22, password login allowed.
+# Only the two basics are verified so that a broken firewall or sshd change
+# is caught.
+if ss -ltnH "sport = :22" | grep -q .; then
+  pass "sshd is listening on the default port 22"
 else
-  fail "persisted port '$PORT_FILE' does not match summary '$SSH_PORT'"
+  fail "sshd is not listening on port 22"
 fi
 
-if [ "$SSH_PORT" -ge 20000 ] && [ "$SSH_PORT" -le 32000 ] && [ "$SSH_PORT" -ne 22 ]; then
-  pass "port $SSH_PORT is in the expected random range"
+if sshd -T 2>/dev/null | grep -qx 'passwordauthentication yes'; then
+  pass "SSH password authentication is enabled"
 else
-  fail "port $SSH_PORT is outside the expected range or is 22"
+  fail "SSH password authentication is not enabled"
 fi
 
-if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx "$SSH_PORT"; then
-  pass "sshd effective config uses port $SSH_PORT"
+if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
+  pass "sshd effective config uses port 22"
 else
-  fail "sshd effective config does not use port $SSH_PORT"
-fi
-
-if ss -ltnH "sport = :$SSH_PORT" | grep -q .; then
-  pass "sshd is listening on $SSH_PORT"
-else
-  fail "sshd is not listening on $SSH_PORT"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'addressfamily inet'; then
-  pass "sshd listens on IPv4 only (AddressFamily inet)"
-else
-  fail "sshd address family is not 'inet'"
-fi
-
-# Ubuntu 22.10+ / 24.04 use ssh.socket, which ignores the Port directive.
-if systemctl list-unit-files ssh.socket 2>/dev/null | grep -q '^ssh.socket'; then
-  if systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
-    fail "ssh.socket is enabled (it keeps sshd on the socket's port)"
-  else
-    pass "ssh.socket is disabled"
-  fi
-  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
-    fail "ssh.socket is active"
-  else
-    pass "ssh.socket is not active"
-  fi
-else
-  skip "ssh.socket is not present on this system"
-fi
-
-if [ "$SSH_GENERATE_KEY" = "True" ] || [ "$SSH_GENERATE_KEY" = "true" ]; then
-  if [ -f "$SSH_KEY" ]; then
-    pass "private key exists: $SSH_KEY"
-    key_mode=$(stat -c '%a' "$SSH_KEY")
-    key_owner=$(stat -c '%U' "$SSH_KEY")
-    [ "$key_mode" = "600" ] && pass "private key mode is 600" || fail "private key mode is $key_mode (expected 600)"
-    [ "$key_owner" = "$ADMIN_USER" ] && pass "private key owner is $ADMIN_USER" || fail "private key owner is $key_owner (expected $ADMIN_USER)"
-  else
-    fail "private key is missing: $SSH_KEY"
-  fi
-else
-  skip "server-side key generation is disabled"
-fi
-
-if [ -f "$ADMIN_HOME/.ssh/authorized_keys" ] && [ -s "$ADMIN_HOME/.ssh/authorized_keys" ]; then
-  pass "authorized_keys is not empty"
-else
-  fail "authorized_keys is empty or missing for $ADMIN_USER"
-fi
-
-if [ -f "$SSH_PUB" ]; then
-  key_body=$(awk '{print $1" "$2}' "$SSH_PUB")
-  if grep -qF "$key_body" "$ADMIN_HOME/.ssh/authorized_keys" 2>/dev/null; then
-    pass "generated public key is authorized for $ADMIN_USER"
-  else
-    fail "generated public key is not present in $ADMIN_HOME/.ssh/authorized_keys"
-  fi
-else
-  skip "no server-generated public key to compare"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'passwordauthentication no'; then
-  pass "SSH password authentication is disabled"
-else
-  fail "SSH password authentication is not disabled"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'pubkeyauthentication yes'; then
-  pass "SSH public-key authentication is enabled"
-else
-  fail "SSH public-key authentication is not enabled"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'permitemptypasswords no'; then
-  pass "empty passwords are rejected"
-else
-  fail "PermitEmptyPasswords is not 'no'"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'allowagentforwarding no'; then
-  pass "SSH agent forwarding is disabled"
-else
-  fail "SSH agent forwarding is not disabled"
-fi
-
-if sshd -T 2>/dev/null | grep -qix 'loglevel verbose'; then
-  pass "sshd log level is VERBOSE"
-else
-  fail "sshd log level is not VERBOSE"
-fi
-
-allowusers=$(sshd -T 2>/dev/null | awk '$1=="allowusers"{$1=""; print substr($0,2)}')
-if printf '%s\n' "$allowusers" | tr ' ' '\n' | grep -qx "$ADMIN_USER"; then
-  pass "AllowUsers includes $ADMIN_USER"
-else
-  fail "AllowUsers does not include $ADMIN_USER (current: ${allowusers:-empty})"
-fi
-
-prl=$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin"{print $2}')
-if [ "$ADMIN_USER" = "root" ]; then
-  if [ "$prl" != "yes" ]; then
-    pass "root password login is disabled (permitrootlogin=$prl)"
-  else
-    fail "permitrootlogin is 'yes'"
-  fi
-else
-  if [ "$prl" = "no" ]; then
-    pass "root login is disabled (permitrootlogin=no)"
-  else
-    fail "permitrootlogin is '$prl' (expected no for admin_user=$ADMIN_USER)"
-  fi
+  fail "sshd effective config does not use port 22"
 fi
 
 section "Firewall ($FIREWALL_BACKEND)"
@@ -257,36 +127,10 @@ if [ "$FIREWALL_BACKEND" = "ufw" ]; then
     fail "UFW default incoming policy is not deny"
   fi
 
-  if [ "$SSH_ALLOWED_FROM" = "any" ]; then
-    if ufw_has_source "Anywhere"; then
-      pass "UFW allows the new SSH port $SSH_PORT from anywhere"
-    else
-      fail "UFW does not allow the new SSH port $SSH_PORT from anywhere"
-    fi
+  if ufw status 2>/dev/null | grep -qE '^22/tcp[[:space:]]+ALLOW'; then
+    pass "UFW allows SSH on the default port 22"
   else
-    all_ok=1
-    IFS=',' read -ra CIDRS <<< "$SSH_ALLOWED_FROM"
-    for cidr in "${CIDRS[@]}"; do
-      if ! ufw_has_source "$cidr"; then
-        all_ok=0
-      fi
-    done
-    if [ "$all_ok" = "1" ]; then
-      pass "UFW restricts the new SSH port to: $SSH_ALLOWED_FROM"
-    else
-      fail "UFW does not restrict port $SSH_PORT to: $SSH_ALLOWED_FROM"
-    fi
-    if ufw_has_source "Anywhere"; then
-      fail "UFW still allows the new SSH port from anywhere"
-    else
-      pass "UFW has no stale allow-any rule for port $SSH_PORT"
-    fi
-  fi
-
-  if ufw status 2>/dev/null | grep -qE '^22/tcp[[:space:]]+DENY'; then
-    pass "UFW denies the default SSH port 22"
-  else
-    fail "UFW does not explicitly deny port 22"
+    fail "UFW does not allow SSH on port 22"
   fi
 
   for port in $FIREWALL_ALLOWED_PORTS; do
@@ -304,43 +148,10 @@ else
     fail "firewalld is not active"
   fi
 
-  if [ "$SSH_ALLOWED_FROM" = "any" ]; then
-    if firewall-cmd --zone="$ZONE" --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "$SSH_PORT/tcp"; then
-      pass "firewalld allows the new SSH port $SSH_PORT"
-    else
-      fail "firewalld does not allow the new SSH port $SSH_PORT"
-    fi
-    if firewall-cmd --zone="$ZONE" --list-rich-rules 2>/dev/null | grep -q "port port=\"$SSH_PORT\""; then
-      fail "firewalld still has source-restricted rules for port $SSH_PORT"
-    else
-      pass "firewalld has no stale source-restricted rules for port $SSH_PORT"
-    fi
-  else
-    rich=$(firewall-cmd --zone="$ZONE" --list-rich-rules 2>/dev/null || true)
-    all_ok=1
-    IFS=',' read -ra CIDRS <<< "$SSH_ALLOWED_FROM"
-    for cidr in "${CIDRS[@]}"; do
-      if ! printf '%s\n' "$rich" | grep -q "source address=\"$cidr\".*port=\"$SSH_PORT\""; then
-        all_ok=0
-      fi
-    done
-    if [ "$all_ok" = "1" ]; then
-      pass "firewalld restricts the new SSH port to: $SSH_ALLOWED_FROM"
-    else
-      fail "firewalld rich rules do not restrict port $SSH_PORT to: $SSH_ALLOWED_FROM"
-    fi
-  fi
-
   if firewall-cmd --zone="$ZONE" --list-services 2>/dev/null | tr ' ' '\n' | grep -qx ssh; then
-    fail "firewalld still allows the default SSH service"
+    pass "firewalld allows the SSH service"
   else
-    pass "firewalld does not allow the default SSH service"
-  fi
-
-  if firewall-cmd --zone="$ZONE" --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx '22/tcp'; then
-    fail "firewalld still allows port 22/tcp"
-  else
-    pass "firewalld does not allow port 22/tcp"
+    fail "firewalld does not allow the SSH service"
   fi
 
   for port in $FIREWALL_ALLOWED_PORTS; do
@@ -623,7 +434,7 @@ else
 fi
 
 section "Listening ports"
-ALLOWED_PORTS="$SSH_PORT $FIREWALL_ALLOWED_PORTS"
+ALLOWED_PORTS="22 $FIREWALL_ALLOWED_PORTS"
 unexpected=""
 while read -r state _recvq _sendq local _peer _rest; do
   [ "$state" = "LISTEN" ] || continue

@@ -19,67 +19,15 @@
     logging: "{{ ufw_logging }}"
 
 # ---------------------------------------------------------------------------
-# Converge the SSH allow rules. When ssh_allowed_cidrs changes ([] -> list,
-# list -> [], or a network is removed), the old rules must be deleted;
-# otherwise a previously opened "allow any" rule survives.
+# SSH stays on its default port. UFW denies all incoming traffic by default,
+# so an explicit allow rule for SSH is required.
 # ---------------------------------------------------------------------------
-- name: Build the desired SSH source list
-  ansible.builtin.set_fact:
-    ufw_ssh_desired_sources: >-
-      {{ ssh_allowed_cidrs if ssh_allowed_cidrs | length > 0 else ['Anywhere'] }}
-
-- name: Find stale SSH allow rules in UFW
-  ansible.builtin.shell:
-    # /bin/sh is dash on Debian/Ubuntu, which does not support pipefail.
-    executable: /bin/bash
-    cmd: |
-      set -o pipefail
-      ufw status numbered | awk -v port="{{ ssh_port }}" -v desired="{{ ufw_ssh_desired_sources | join(',') }}" '
-        BEGIN {
-          n = split(desired, sources, ",")
-          for (i = 1; i <= n; i++) keep[sources[i]] = 1
-        }
-        /^\[[ 0-9]+\]/ {
-          number = $0
-          sub(/^\[[ ]*/, "", number)
-          sub(/\].*/, "", number)
-          line = $0
-          sub(/#.*/, "", line)
-          sub(/[ \t]+$/, "", line)
-          sub(/[ \t]+\(v6\)$/, "", line)
-          sub(/[ \t]+$/, "", line)
-          if (line ~ ("(^|[^0-9])" port "/tcp( \\(v6\\))?[ \t]+ALLOW")) {
-            n = split(line, fields, /[ \t]+/)
-            source = fields[n]
-            if (!(source in keep)) print number
-          }
-        }' | sort -rn
-  register: ufw_stale_ssh_rules
-  changed_when: false
-  check_mode: false
-
-- name: Remove stale SSH allow rules from UFW
-  ansible.builtin.command:
-    cmd: "ufw --force delete {{ item }}"
-  loop: "{{ ufw_stale_ssh_rules.stdout_lines }}"
-  when: ufw_stale_ssh_rules.stdout_lines | length > 0
-  changed_when: true
-
-- name: Allow SSH on the new random port
+- name: Allow SSH on the default port
   community.general.ufw:
     rule: allow
-    port: "{{ ssh_port }}"
-    proto: tcp
-    from: "{{ item }}"
-    comment: "SSH on port {{ ssh_port }}"
-  loop: "{{ ssh_allowed_cidrs if (ssh_allowed_cidrs | length > 0) else ['any'] }}"
-
-- name: Deny SSH on the default port
-  community.general.ufw:
-    rule: deny
     port: "22"
     proto: tcp
-    comment: "SSH moved to {{ ssh_port }}"
+    comment: "SSH"
 
 - name: Allow additional ports
   community.general.ufw:
