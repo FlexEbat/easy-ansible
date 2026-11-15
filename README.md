@@ -54,38 +54,97 @@ Debian 12 и Ubuntu 22.04 больше не поддерживаются: для
     └── docker/        # официальный Docker CE и daemon.json
 ```
 
-## Быстрый запуск (LXC linux-lab)
+## Быстрый запуск на реальной машине
 
-Из хоста:
+Нужны: Debian 13 / Ubuntu 24.04 / RHEL-семейство, root или пользователь с
+`sudo`, доступ в интернет.
+
+> **Перед запуском** держите под рукой консоль (панель VPS, монитор или
+> IPMI) или вторую SSH-сессию. Плейбук включает firewall: входящие запрещены,
+> открыт только `22/tcp` и порты из `firewall_allowed_ports`. Нужные порты
+> (например, 80/443) укажите заранее.
+
+### Вариант 1. Прямо на самой машине
+
+```bash
+# 1. git
+sudo apt-get update && sudo apt-get install -y git     # Debian/Ubuntu
+sudo dnf install -y git                                 # RHEL-семейство
+
+# 2. код
+git clone https://github.com/FlexEbat/easy-ansible.git
+cd easy-ansible
+
+# 3. запуск (Ansible и коллекции run.sh поставит сам)
+sudo ./run.sh -e admin_user="$USER" -e '{
+  "admin_user_authorized_keys": ["ssh-ed25519 AAAA... me@laptop"],
+  "crowdsec_whitelist_ips": ["203.0.113.5"],
+  "crowdsec_whitelist_cidrs": [],
+  "firewall_allowed_ports": [{"port": 80}, {"port": 443}]
+}'
+
+# 4. проверка
+sudo ./verify.sh
+```
+
+- Укажите `admin_user` явно: под `sudo` Ansible видит себя как `root`, и без
+  `-e admin_user=...` проверка группы sudo и доступ к Docker будут относиться
+  к `root`, а не к вам.
+- `crowdsec_whitelist_ips` — ваши адреса для управления (домашний/офисный IP,
+  VPN), которые CrowdSec не должен банить. В `inventory.ini` для лаборатории
+  задана сеть `192.168.1.0/24`; `-e` из примера выше перекрывает её. Либо
+  отредактируйте `[local:vars]` в файле.
+- Группа `[local]` в `inventory.ini` — просто локальное подключение
+  (`ansible_connection=local`), имя `linux-lab` ни на что не влияет.
+- Если в итогах `Reboot required: True`, перезагрузитесь (`sudo reboot`):
+  новое ядро и параметр `ipv6.disable=1` вступают в силу только после этого.
+
+### Вариант 2. С ноутбука на удалённый сервер
+
+На ноутбуке нужен Ansible (`pip install ansible-core` или пакет дистрибутива).
+
+```bash
+git clone https://github.com/FlexEbat/easy-ansible.git
+cd easy-ansible
+ansible-galaxy collection install -r requirements.yml
+
+# свой inventory (НЕ inventory.ini: в нём группа [local], и плейбук с
+# `hosts: all` настроил бы заодно и ваш ноутбук)
+cat > prod.ini <<'EOF'
+[servers]
+prod-01 ansible_host=203.0.113.10 ansible_user=admin
+
+[servers:vars]
+crowdsec_whitelist_ips=["198.51.100.7"]
+EOF
+
+ansible-playbook -i prod.ini site.yml -K -e admin_user=admin \
+  -e '{"firewall_allowed_ports": [{"port": 80}, {"port": 443}]}'
+
+# проверка на сервере
+scp verify.sh admin@203.0.113.10:/tmp/
+ssh -t admin@203.0.113.10 'sudo bash /tmp/verify.sh'
+```
+
+`ansible_user` должен входить по SSH и иметь `sudo`; `-K` запрашивает его
+пароль для sudo (не нужен при `admin_user_sudo_nopasswd=true`). После запуска
+имеет смысл закрыть вход по паролю — см. раздел «SSH».
+
+### Тест в LXC-контейнере (linux-lab)
 
 ```bash
 # скопировать проект в контейнер
-tar -C "$HOME" -czf - ansible | lxc exec linux-lab -- bash -lc 'tar -xzf - -C /root'
+tar -C "$HOME" -czf - easy-ansible | lxc exec linux-lab -- bash -lc 'tar -xzf - -C /root'
 
-# запустить; admin_user по умолчанию равен ansible_user
-lxc exec linux-lab -- bash -lc 'cd /root/ansible && ./run.sh -e admin_user=labadmin'
-
-# проверить всё
-lxc exec linux-lab -- bash -lc 'cd /root/ansible && ./verify.sh'
+lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./run.sh -e admin_user=labadmin'
+lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 ```
 
-Либо просто зайти в контейнер и работать там:
-
-```bash
-lxc exec linux-lab -- bash
-cd /root/ansible
-./run.sh -e admin_user=labadmin
-./verify.sh
-```
+В контейнере kernel-настройки (BBR, sysctl, zram, параметры загрузки)
+только записываются, но не применяются — ядром управляет хост.
 
 `run.sh` при необходимости сам ставит Ansible (`apt` или `dnf`) и коллекции
 `ansible.posix` / `community.general` из `requirements.yml`.
-
-Для удалённого сервера:
-
-```bash
-ansible-playbook -i inventory.ini site.yml -e admin_user=admin
-```
 
 `admin_user` по умолчанию — `ansible_user` (аккаунт, под которым Ansible
 подключается к хосту), а не `$USER` на control node. Это важно при запуске с
