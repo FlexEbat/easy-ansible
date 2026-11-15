@@ -1,22 +1,41 @@
-# Hardening playbook для Debian, Ubuntu и RHEL
+# easy-ansible
 
-Ansible-плейбук приводит чистый сервер (или LXC/Docker-контейнер) к состоянию:
+Ansible-плейбук, который за один запуск приводит свежий Debian/Ubuntu или
+RHEL-совместимый Linux к безопасному и удобному состоянию: обновления,
+firewall, защита от перебора (CrowdSec), Docker, сетевая и ядерная
+оптимизация. Подходит и для **домашнего компьютера**, и для **сервера (VPS)**;
+запускается на самой машине или удалённо.
+
+- [Что делает](#что-делает)
+- [Поддерживаемые ОС](#поддерживаемые-ос)
+- [Перед запуском](#перед-запуском)
+- [Запуск на домашнем компьютере](#запуск-на-домашнем-компьютере-или-домашнем-сервере)
+- [Запуск на сервере (VPS)](#запуск-на-сервере-vps)
+- [Повторный запуск и изменение настроек](#повторный-запуск-и-изменение-настроек)
+- [Проверка результата](#проверка-результата)
+- [Переменные](#переменные) и [что именно настраивается](#что-именно-настраивается)
+- [Если что-то пошло не так](#если-что-то-пошло-не-так)
+- [Безопасность и ограничения](#безопасность-и-ограничения)
+
+## Что делает
 
 1. Определяет ОС и обновляет все пакеты (`apt dist-upgrade` или `dnf upgrade`).
-2. Устанавливает `sudo`, `curl`/`curl-minimal`, `wget`, `mtr`, `trippy`, `git`,
-   `zram`, `CrowdSec`, официальный `Docker CE` и автообновления.
-3. Настраивает firewall, CrowdSec (+ firewall bouncer), BBR, отключение IPv6
-   (можно выключить), сетевые sysctl, zram, синхронизацию времени (`chrony`)
-   и лимит журнала `journald`.
-4. Проверяет, что `admin_user` есть в группе администраторов; если нет —
-   создаёт пользователя (с паролем и/или SSH-ключами, если они заданы) и
-   настраивает sudo.
-5. Сообщает, требуется ли перезагрузка после обновления.
+2. Ставит нужные программы: `sudo`, `curl`, `wget`, `git`, `mtr`, `trippy`,
+   `chrony`, `zram`, `CrowdSec` и официальный `Docker CE`; включает автообновления.
+3. Включает firewall (UFW или firewalld): входящие закрыты, открыт SSH
+   (`22/tcp`) и порты, которые вы укажете.
+4. Настраивает CrowdSec с firewall bouncer: перебор паролей и сканирование
+   приводят к бану адреса. Ваши адреса можно внести в whitelist.
+5. Включает BBR, защитные сетевые sysctl, zram-swap, лимит журнала `journald`;
+   IPv6 по умолчанию отключается (можно оставить).
+6. Проверяет `admin_user` в группе sudo/wheel; если пользователя нет — создаёт
+   его (с паролем и/или SSH-ключами, если они заданы).
+7. По желанию (`ssh_harden`) закрывает вход в SSH по паролю.
+8. Сообщает, нужна ли перезагрузка, и сохраняет итоги в
+   `/etc/ansible-setup-summary.json`; `verify.sh` проверяет результат.
 
-По умолчанию SSH плейбук **не трогает**: `sshd` остаётся с конфигурацией
-дистрибутива — порт 22 и вход по логину и паролю. Firewall открывает `22/tcp`
-явно (в UFW с ограничением частоты подключений). Жёсткая настройка `sshd`
-включается отдельной опцией `ssh_harden` (см. раздел «SSH»).
+Повторный запуск безопасен: плейбук идемпотентен, повторный прогон ничего
+не меняет, если настройки не менялись (кроме установки новых обновлений пакетов).
 
 ## Поддерживаемые ОС
 
@@ -29,45 +48,33 @@ Debian 12 и Ubuntu 22.04 больше не поддерживаются: для
 пакетов CrowdSec/Docker в нужной конфигурации. Плейбук проверяет ОС в начале и
 останавливается с понятной ошибкой на неподдерживаемой системе.
 
-## Структура
+## Перед запуском
 
-```
-.
-├── ansible.cfg
-├── inventory.ini
-├── site.yml
-├── group_vars/all.yml
-├── requirements.yml
-├── run.sh
-├── verify.sh
-├── .ansible-lint
-├── .yamllint
-├── .github/workflows/ci.yml
-├── molecule/default/          # Molecule (Debian 13, Ubuntu 24.04, Rocky 9; Rocky 8 — best effort)
-└── roles/                     # у каждой роли свои defaults/main.yml
-    ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
-    ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
-    ├── ssh/           # опциональная настройка sshd (ssh_harden, по умолчанию выключена)
-    ├── firewall/      # UFW или firewalld (SSH на порту 22 разрешён)
-    ├── crowdsec/      # сервис, LAPI, collections, bouncer, whitelist
-    ├── kernel/        # BBR, IPv6, sysctl hardening, zram
-    └── docker/        # официальный Docker CE и daemon.json
-```
+1. **Доступ к консоли.** Для сервера — панель VPS/IPMI, для домашней машины —
+   монитор или второй терминал. Плейбук включает firewall, и ошибка в портах
+   может закрыть доступ по сети.
+2. **Откройте нужные порты заранее** через `firewall_allowed_ports` (например,
+   80/443 для веба, `445` из локальной сети для Samba). Всё остальное входящее
+   будет закрыто, кроме SSH.
+3. **Первый запуск долгий:** сначала обновляются все пакеты, ставится Docker.
+   Не прерывайте его; после завершения при необходимости перезагрузитесь.
+4. **Свои настройки — в файле `vars.local.yml`:**
 
-## Быстрый запуск на реальной машине
+   ```bash
+   cp vars.example.yml vars.local.yml
+   nano vars.local.yml      # раскомментируйте и поправьте нужное
+   ```
 
-Нужны: Debian 13 / Ubuntu 24.04 / RHEL-семейство, root или пользователь с
-`sudo`, доступ в интернет.
+   Файл в `.gitignore` и не попадёт в репозиторий. Подключается ключом
+   `-e @vars.local.yml`.
 
-> **Перед запуском** держите под рукой консоль (панель VPS, монитор или
-> IPMI) или вторую SSH-сессию. Плейбук включает firewall: входящие запрещены,
-> открыт только `22/tcp` и порты из `firewall_allowed_ports`. Нужные порты
-> (например, 80/443) укажите заранее.
+## Запуск на домашнем компьютере или домашнем сервере
 
-### Вариант 1. Прямо на самой машине
+Подходит для ноутбука/десктопа/мини-ПК с Debian, Ubuntu, AlmaLinux, Rocky Linux
+и т. п., запускается **прямо на этой машине** под вашим пользователем с `sudo`.
 
 ```bash
-# 1. git
+# 1. git (если ещё нет)
 sudo apt-get update && sudo apt-get install -y git     # Debian/Ubuntu
 sudo dnf install -y git                                 # RHEL-семейство
 
@@ -75,86 +82,177 @@ sudo dnf install -y git                                 # RHEL-семейств�
 git clone https://github.com/FlexEbat/easy-ansible.git
 cd easy-ansible
 
-# 3. запуск (Ansible и коллекции run.sh поставит сам)
-sudo ./run.sh -e admin_user="$USER" -e '{
-  "admin_user_authorized_keys": ["ssh-ed25519 AAAA... me@laptop"],
-  "crowdsec_whitelist_ips": ["203.0.113.5"],
-  "crowdsec_whitelist_cidrs": [],
-  "firewall_allowed_ports": [{"port": 80}, {"port": 443}]
-}'
+# 3. свои настройки (см. подсказки ниже)
+cp vars.example.yml vars.local.yml
+nano vars.local.yml
 
-# 4. проверка
+# 4. запуск; Ansible и нужные коллекции run.sh поставит сам
+sudo ./run.sh -e admin_user="$USER" -e @vars.local.yml
+
+# 5. проверка
 sudo ./verify.sh
 ```
 
-- Укажите `admin_user` явно: под `sudo` Ansible видит себя как `root`, и без
-  `-e admin_user=...` проверка группы sudo и доступ к Docker будут относиться
-  к `root`, а не к вам.
-- `crowdsec_whitelist_ips` — ваши адреса для управления (домашний/офисный IP,
-  VPN), которые CrowdSec не должен банить. В `inventory.ini` для лаборатории
-  задана сеть `192.168.1.0/24`; `-e` из примера выше перекрывает её. Либо
-  отредактируйте `[local:vars]` в файле.
-- Группа `[local]` в `inventory.ini` — просто локальное подключение
-  (`ansible_connection=local`), имя `linux-lab` ни на что не влияет.
-- Если в итогах `Reboot required: True`, перезагрузитесь (`sudo reboot`):
-  новое ядро и параметр `ipv6.disable=1` вступают в силу только после этого.
+Что заполнить в `vars.local.yml` для дома:
 
-### Вариант 2. С ноутбука на удалённый сервер
+```yaml
+crowdsec_whitelist_cidrs: ["192.168.1.0/24"]   # ваша домашняя сеть: её CrowdSec не банит
+firewall_allowed_ports:                        # то, к чему должны подключаться из дома
+  - {port: 445, proto: tcp, from: 192.168.1.0/24}   # например, Samba
+docker_default_bind_ip: 127.0.0.1              # порты контейнеров только для самой машины
+# disable_ipv6: false                          # раскомментируйте, если IPv6 нужен
+```
 
-На ноутбуке нужен Ansible (`pip install ansible-core` или пакет дистрибутива).
+Что учесть:
+
+- **`-e admin_user="$USER"` обязателен.** Под `sudo` Ansible считает, что он
+  `root`; без этого проверка sudo и группа `docker` относились бы к `root`.
+  Пользователь уже есть в системе, пароль и ключи задавать не нужно.
+- **Firewall закроет входящие подключения из локальной сети** (Samba, Plex,
+  Syncthing, KDE Connect и т. п.). Откройте нужное в `firewall_allowed_ports`
+  с ограничением `from: ваша сеть`.
+- **mDNS/LLMNR в `systemd-resolved` отключаются.** Обнаружение `*.local` через
+  resolved перестанет работать (Avahi это не затрагивает).
+- **Docker обходит firewall:** `docker_default_bind_ip: 127.0.0.1` делает порты
+  контейнеров доступными только локально; наружу публикуйте явно
+  (`"192.168.1.10:8080:80"` в compose).
+- **Перезагрузитесь после первого запуска**, если в итогах
+  `Reboot required: True`: новое ядро и отключение IPv6 вступают в силу только
+  после этого.
+- **`verify.sh` на десктопе может показать FAIL «unexpected external TCP
+  listeners»** — это значит, что какая-то служба слушает на всех интерфейсах
+  (`sudo ss -ltnp` покажет, какая). Закройте её или откройте порт осознанно.
+
+## Запуск на сервере (VPS)
+
+Рекомендуемый порядок для нового сервера: **сначала настроить и зайти по
+ключу, потом закрыть пароли**. Так вы не потеряете доступ.
+
+### Вариант А. Прямо на сервере (через консоль или SSH под root)
+
+```bash
+# 1. git
+apt-get update && apt-get install -y git               # Debian/Ubuntu
+# dnf install -y git                                    # RHEL-семейство
+
+# 2. код и настройки
+git clone https://github.com/FlexEbat/easy-ansible.git
+cd easy-ansible
+cp vars.example.yml vars.local.yml
+nano vars.local.yml
+
+# 3. запуск
+./run.sh -e @vars.local.yml
+
+# 4. проверка
+./verify.sh
+```
+
+Минимальный `vars.local.yml` для сервера:
+
+```yaml
+admin_user: admin                         # создаётся, если его нет
+admin_user_authorized_keys:
+  - ssh-ed25519 AAAA... me@laptop         # ваш публичный ключ (cat ~/.ssh/id_ed25519.pub)
+admin_user_sudo_nopasswd: true            # у key-only пользователя нет пароля для sudo
+crowdsec_whitelist_ips: ["203.0.113.5"]   # ваш IP для управления, чтобы не забанили
+crowdsec_whitelist_cidrs: []
+firewall_allowed_ports:
+  - {port: 80}
+  - {port: 443}
+docker_default_bind_ip: 127.0.0.1         # порты контейнеров не торчат в интернет
+# auto_reboot: true                       # перезагружаться самому после обновлений ядра
+```
+
+> Без `admin_user_authorized_keys` (или `admin_user_password_hash`) новый
+> пользователь создаётся **заблокированным** и войти им нельзя. А без
+> `admin_user_sudo_nopasswd: true` пользователь без пароля не сможет выполнить
+> `sudo`. Ключ и пароль/`NOPASSWD` нужны вместе.
+
+**Закройте вход по паролю** (второй запуск). Сначала проверьте вход по ключу в
+**новой** терминальной сессии, текущую не закрывайте:
+
+```bash
+ssh admin@203.0.113.10        # должно пустить по ключу, без пароля
+```
+
+Затем на сервере:
+
+```bash
+./run.sh -e @vars.local.yml \
+  -e ssh_harden=true -e ssh_password_auth=false -e ssh_permit_root_login=no
+```
+
+Плейбук откажется отключать пароли, если у `admin_user` нет ключей в
+`authorized_keys`. Настройка применяется через `reload`, текущие сессии не
+разрываются. Подробности — в разделе «SSH».
+
+### Вариант Б. Удалённо, с ноутбука
+
+На ноутбуке нужен Ansible (`pip install ansible-core` или пакет дистрибутива) и
+SSH-доступ к серверу с `sudo`.
 
 ```bash
 git clone https://github.com/FlexEbat/easy-ansible.git
 cd easy-ansible
 ansible-galaxy collection install -r requirements.yml
+cp vars.example.yml vars.local.yml && nano vars.local.yml
 
-# свой inventory (НЕ inventory.ini: в нём группа [local], и плейбук с
-# `hosts: all` настроил бы заодно и ваш ноутбук)
+# собственный inventory
 cat > prod.ini <<'EOF'
 [servers]
 prod-01 ansible_host=203.0.113.10 ansible_user=admin
-
-[servers:vars]
-crowdsec_whitelist_ips=["198.51.100.7"]
 EOF
 
-ansible-playbook -i prod.ini site.yml -K -e admin_user=admin \
-  -e '{"firewall_allowed_ports": [{"port": 80}, {"port": 443}]}'
+ansible-playbook -i prod.ini site.yml -K -e @vars.local.yml
 
 # проверка на сервере
 scp verify.sh admin@203.0.113.10:/tmp/
 ssh -t admin@203.0.113.10 'sudo bash /tmp/verify.sh'
 ```
 
-`ansible_user` должен входить по SSH и иметь `sudo`; `-K` запрашивает его
-пароль для sudo (не нужен при `admin_user_sudo_nopasswd=true`). После запуска
-имеет смысл закрыть вход по паролю — см. раздел «SSH».
+- **Используйте свой `prod.ini`, а не `inventory.ini`.** В `inventory.ini` есть
+  группа `[local]`, а в плейбуке `hosts: all`: запуск с ним настроил бы заодно и
+  ваш ноутбук.
+- `-K` запрашивает пароль `sudo` для `ansible_user` (не нужен при
+  `admin_user_sudo_nopasswd: true`).
+- `admin_user` по умолчанию — это `ansible_user` (пользователь, под которым
+  Ansible заходит на сервер), а не `$USER` ноутбука.
+- Дополнительно проверьте firewall **у хостера** (облачные security groups):
+  порты должны быть открыты и там.
 
-### Тест в LXC-контейнере (linux-lab)
+## Повторный запуск и изменение настроек
+
+Измените `vars.local.yml` и запустите ту же команду ещё раз: применятся только
+различия. Примеры:
+
+| Что нужно | Как |
+|---|---|
+| открыть порт | добавить запись в `firewall_allowed_ports` |
+| оставить IPv6 | `disable_ipv6: false` (конфиги удалятся, IPv6 вернётся после перезагрузки) |
+| выключить автообновления | `auto_updates_enabled: false` |
+| вернуть вход по паролю | `ssh_harden: false` (drop-in удаляется) |
+| не ставить `trippy`, `chrony` | `base_install_trippy: false`, `base_time_sync: false` |
+| посмотреть, что получилось | `sudo ./verify.sh` и `cat /etc/ansible-setup-summary.json` |
+
+Полный список переменных — в разделе «Переменные».
+
+### Тест в LXC-контейнере
+
+Для отладки плейбука (не для реальной защиты):
 
 ```bash
-# скопировать проект в контейнер
 tar -C "$HOME" -czf - easy-ansible | lxc exec linux-lab -- bash -lc 'tar -xzf - -C /root'
-
 lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./run.sh -e admin_user=labadmin'
 lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 ```
 
-В контейнере kernel-настройки (BBR, sysctl, zram, параметры загрузки)
-только записываются, но не применяются — ядром управляет хост.
+В контейнере kernel-настройки (BBR, sysctl, zram, параметры загрузки) только
+записываются, но не применяются: ядром управляет хост.
 
-`run.sh` при необходимости сам ставит Ansible (`apt` или `dnf`) и коллекции
-`ansible.posix` / `community.general` из `requirements.yml`.
+## Проверка результата
 
-`admin_user` по умолчанию — `ansible_user` (аккаунт, под которым Ansible
-подключается к хосту), а не `$USER` на control node. Это важно при запуске с
-ноутбука: без `-e admin_user=...` будет выбран именно удалённый пользователь.
-
-Беспарольный sudo по умолчанию **выключен**. Если при удалённом запуске Ansible
-подключается пользователем, который полагался на `NOPASSWD`, передайте пароль
-(`-K`) или включите `-e admin_user_sudo_nopasswd=true`.
-
-## Итоги запуска
+### Итоги запуска
 
 После запуска на сервере есть файл `/etc/ansible-setup-summary.json`:
 
@@ -180,7 +278,43 @@ lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 печатает основные значения в задаче `Show setup summary`. `verify.sh`
 сверяет систему именно с этим файлом.
 
+### Скрипт verify.sh
+
+`verify.sh` определяет ОС и проверяет:
+
+- установленные пакеты (apt/rpm; `curl-minimal` засчитывается как `curl`);
+- SSH: `sshd` слушает порт 22; при `ssh_harden=true` проверяются
+  `PasswordAuthentication` и `PermitRootLogin` из настроек плейбука (вход по
+  паролю сам по себе не требуется и не запрещается);
+- firewall: UFW или firewalld (active, порт 22 разрешён — `LIMIT` при
+  `firewall_ssh_rate_limit`, `firewall_allowed_ports` вместе с протоколом);
+- `chrony`, лимит `journald`;
+- active `crowdsec` и `crowdsec-firewall-bouncer`, LAPI, метрики, коллекцию
+  `sshd`, парсер whitelists, зарегистрированный bouncer и его режим;
+- `rsyslog` и `/var/log/auth.log` на Debian/Ubuntu;
+- автообновления (unattended-upgrades / dnf-automatic);
+- конфиг BBR, IPv6 и sysctl hardening (runtime-значения — на не-контейнере);
+- конфиг zram и активный сервис (на не-контейнере);
+- Docker CE service, ответ daemon, `daemon.json` и доступ к сокету;
+- членство в sudo/wheel; `sudo -n` — только при `admin_user_sudo_nopasswd=true`
+  (иначе проверяется, что файл sudoers не создан);
+- отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт 22,
+  loopback и `firewall_allowed_ports`;
+- необходимость перезагрузки.
+
+Запуск (нужны root-права — скрипт читает `sshd -T`, `ufw status` и файлы,
+доступные только root):
+
+```bash
+sudo ./verify.sh
+```
+
+При успехе скрипт завершается с кодом 0 и печатает `passed/failed/skipped`.
+
 ## Переменные
+
+Свои значения удобно держать в `vars.local.yml` (шаблон — `vars.example.yml`) и
+подключать ключом `-e @vars.local.yml`.
 
 Общие переменные (`admin_user*`, `firewall_allowed_ports`, определение ОС)
 лежат в `group_vars/all.yml`. Всё, что относится к одной роли, — в
@@ -363,38 +497,45 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
   `visudo -cf`. При `false` (по умолчанию) этот файл удаляется.
 - Для `admin_user=root` членство в группе не требуется.
 
-## Проверка
+## Если что-то пошло не так
 
-`verify.sh` определяет ОС и проверяет:
+| Симптом | Что делать |
+|---|---|
+| Потерял SSH-доступ после запуска | зайдите через консоль хостера/монитор; проверьте `sudo ufw status` (или `firewall-cmd --list-all`) и `sudo systemctl status ssh` (на RHEL `sshd`) |
+| Меня забанил CrowdSec | `sudo cscli decisions list`, затем `sudo cscli decisions delete --ip ВАШ_IP`; добавьте IP в `crowdsec_whitelist_ips` и запустите плейбук снова |
+| Нужный порт недоступен | добавьте его в `firewall_allowed_ports` и запустите плейбук снова; проверьте также firewall хостера |
+| Порт контейнера виден из интернета | Docker обходит UFW: задайте `docker_default_bind_ip: 127.0.0.1` или публикуйте порт с явным адресом |
+| `sudo` просит пароль, а у пользователя его нет | `admin_user_sudo_nopasswd: true` или задайте `admin_user_password_hash` |
+| Новая учётка не может войти | не заданы ни `admin_user_authorized_keys`, ни `admin_user_password_hash`; добавьте и запустите снова |
+| `verify.sh`: FAIL «unexpected external TCP listeners» | `sudo ss -ltnp` покажет службу; закройте её или откройте порт осознанно |
+| `verify.sh`: BBR/zram не применены | это нормально в контейнере; на VM/железе — перезагрузитесь и проверьте снова |
+| Плейбук упал посередине | исправьте причину и запустите снова: он идемпотентен и продолжит с нужного места |
 
-- установленные пакеты (apt/rpm; `curl-minimal` засчитывается как `curl`);
-- SSH: `sshd` слушает порт 22; при `ssh_harden=true` проверяются
-  `PasswordAuthentication` и `PermitRootLogin` из настроек плейбука (вход по
-  паролю сам по себе не требуется и не запрещается);
-- firewall: UFW или firewalld (active, порт 22 разрешён — `LIMIT` при
-  `firewall_ssh_rate_limit`, `firewall_allowed_ports` вместе с протоколом);
-- `chrony`, лимит `journald`;
-- active `crowdsec` и `crowdsec-firewall-bouncer`, LAPI, метрики, коллекцию
-  `sshd`, парсер whitelists, зарегистрированный bouncer и его режим;
-- `rsyslog` и `/var/log/auth.log` на Debian/Ubuntu;
-- автообновления (unattended-upgrades / dnf-automatic);
-- конфиг BBR, IPv6 и sysctl hardening (runtime-значения — на не-контейнере);
-- конфиг zram и активный сервис (на не-контейнере);
-- Docker CE service, ответ daemon, `daemon.json` и доступ к сокету;
-- членство в sudo/wheel; `sudo -n` — только при `admin_user_sudo_nopasswd=true`
-  (иначе проверяется, что файл sudoers не создан);
-- отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт 22,
-  loopback и `firewall_allowed_ports`;
-- необходимость перезагрузки.
+## Структура
 
-Запуск (нужны root-права — скрипт читает `sshd -T`, `ufw status` и файлы,
-доступные только root):
-
-```bash
-sudo ./verify.sh
 ```
-
-При успехе скрипт завершается с кодом 0 и печатает `passed/failed/skipped`.
+.
+├── ansible.cfg
+├── inventory.ini
+├── site.yml
+├── group_vars/all.yml
+├── requirements.yml
+├── run.sh
+├── vars.example.yml           # шаблон своих настроек (копия: vars.local.yml)
+├── verify.sh
+├── .ansible-lint
+├── .yamllint
+├── .github/workflows/ci.yml
+├── molecule/default/          # Molecule (Debian 13, Ubuntu 24.04, Rocky 9; Rocky 8 — best effort)
+└── roles/                     # у каждой роли свои defaults/main.yml
+    ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
+    ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
+    ├── ssh/           # опциональная настройка sshd (ssh_harden, по умолчанию выключена)
+    ├── firewall/      # UFW или firewalld (SSH на порту 22 разрешён)
+    ├── crowdsec/      # сервис, LAPI, collections, bouncer, whitelist
+    ├── kernel/        # BBR, IPv6, sysctl hardening, zram
+    └── docker/        # официальный Docker CE и daemon.json
+```
 
 ## Тесты и линтеры
 

@@ -3,3 +3,4 @@ artifacts/
 .ansible/
 .cache/
 __pycache__/
+vars.local.yml
