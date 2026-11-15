@@ -24,6 +24,15 @@ info() { printf '  [INFO] %s\n' "$*"; }
 
 section() { printf '\n== %s ==\n' "$*"; }
 
+# expect_eq NAME ACTUAL EXPECTED  -> PASS when equal, FAIL otherwise
+expect_eq() {
+  if [ "$2" = "$3" ]; then
+    pass "$1 is $3"
+  else
+    fail "$1 is '$2' (expected $3)"
+  fi
+}
+
 if [ ! -r "$SUMMARY" ]; then
   echo "Missing $SUMMARY. Run the playbook first." >&2
   exit 1
@@ -334,7 +343,11 @@ if json_true base_time_sync; then
     else
       time_unit="chronyd"
     fi
-    systemctl is-active --quiet "$time_unit" && pass "$time_unit is active" || fail "$time_unit is not active"
+    if systemctl is-active --quiet "$time_unit"; then
+      pass "$time_unit is active"
+    else
+      fail "$time_unit is not active"
+    fi
   fi
 fi
 
@@ -359,8 +372,8 @@ if is_container; then
 else
   cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || true)
   qdisc=$(cat /proc/sys/net/core/default_qdisc 2>/dev/null || true)
-  [ "$cc" = "bbr" ] && pass "kernel is using BBR" || fail "kernel congestion control is '$cc' (expected bbr)"
-  [ "$qdisc" = "fq" ] && pass "kernel default qdisc is fq" || fail "kernel default qdisc is '$qdisc' (expected fq)"
+  expect_eq "kernel congestion control" "$cc" "bbr"
+  expect_eq "kernel default qdisc" "$qdisc" "fq"
 fi
 
 HARDENING=/etc/sysctl.d/99-hardening.conf
@@ -384,9 +397,9 @@ else
   rp=$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null || true)
   sc=$(cat /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null || true)
   ar=$(cat /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null || true)
-  [ "$rp" = "$RP_FILTER" ] && pass "rp_filter is $RP_FILTER" || fail "rp_filter is '$rp' (expected $RP_FILTER)"
-  [ "$sc" = "1" ] && pass "SYN cookies are enabled" || fail "tcp_syncookies is '$sc' (expected 1)"
-  [ "$ar" = "0" ] && pass "ICMP redirects are ignored" || fail "accept_redirects is '$ar' (expected 0)"
+  expect_eq "rp_filter" "$rp" "$RP_FILTER"
+  expect_eq "tcp_syncookies" "$sc" "1"
+  expect_eq "accept_redirects" "$ar" "0"
 fi
 
 if json_true disable_ipv6; then
@@ -461,8 +474,16 @@ fi
 if is_container; then
   skip "zram is not startable inside $container_type (no zram device)"
 else
-  systemctl is-active --quiet "$ZRAM_UNIT" && pass "$ZRAM_UNIT is active" || fail "$ZRAM_UNIT is not active"
-  [ -e /dev/zram0 ] && pass "/dev/zram0 exists" || fail "/dev/zram0 is missing"
+  if systemctl is-active --quiet "$ZRAM_UNIT"; then
+    pass "$ZRAM_UNIT is active"
+  else
+    fail "$ZRAM_UNIT is not active"
+  fi
+  if [ -e /dev/zram0 ]; then
+    pass "/dev/zram0 exists"
+  else
+    fail "/dev/zram0 is missing"
+  fi
 fi
 
 section "Docker"
@@ -551,6 +572,8 @@ while read -r state _recvq _sendq local _peer _rest; do
   case "$addr" in
     127.*|"[::1]"|"::1"|localhost) continue ;;
   esac
+  # ALLOWED_PORTS is a space-separated list; splitting it is intended.
+  # shellcheck disable=SC2086
   if ! printf '%s\n' $ALLOWED_PORTS | grep -qx "$port"; then
     unexpected="$unexpected $local"
   fi

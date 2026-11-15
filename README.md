@@ -53,20 +53,38 @@ Debian 12 и Ubuntu 22.04 больше не поддерживаются: для
 1. **Доступ к консоли.** Для сервера — панель VPS/IPMI, для домашней машины —
    монитор или второй терминал. Плейбук включает firewall, и ошибка в портах
    может закрыть доступ по сети.
-2. **Откройте нужные порты заранее** через `firewall_allowed_ports` (например,
-   80/443 для веба, `445` из локальной сети для Samba). Всё остальное входящее
-   будет закрыто, кроме SSH.
-3. **Первый запуск долгий:** сначала обновляются все пакеты, ставится Docker.
+2. **Первый запуск долгий:** сначала обновляются все пакеты, ставится Docker.
    Не прерывайте его; после завершения при необходимости перезагрузитесь.
-4. **Свои настройки — в файле `vars.local.yml`:**
+3. **Настройки вводить заранее не нужно.** При первом запуске `./run.sh` сам
+   задаст несколько вопросов (кто администратор, ваш SSH-ключ, ваши адреса,
+   какие порты открыть) и сохранит ответы в `vars.local.yml`. Если этот файл уже
+   есть, скрипт просто прочитает его и ничего не спросит.
 
-   ```bash
-   cp vars.example.yml vars.local.yml
-   nano vars.local.yml      # раскомментируйте и поправьте нужное
-   ```
+## Как работает run.sh
 
-   Файл в `.gitignore` и не попадёт в репозиторий. Подключается ключом
-   `-e @vars.local.yml`.
+```text
+./run.sh
+   ├─ нет root?             → перезапускается через sudo
+   ├─ нет Ansible?          → ставит Ansible и коллекции
+   ├─ нет vars.local.yml?   → задаёт вопросы (wizard.sh) и создаёт файл
+   ├─ файл есть?            → читает его, вопросов нет
+   └─ запускает плейбук с вашими настройками
+```
+
+| Команда | Что делает |
+|---|---|
+| `sudo ./run.sh` | обычный запуск: использует `vars.local.yml` или сначала создаёт его |
+| `./run.sh --wizard` | задать вопросы заново (старый файл сохранится как `vars.local.yml.bak`) |
+| `./run.sh --wizard-only` | только создать `vars.local.yml` и выйти; root не нужен (например, на ноутбуке перед удалённым запуском) |
+| `./run.sh --no-wizard` | никогда не спрашивать: взять `vars.local.yml`, если он есть, иначе значения по умолчанию |
+| `./run.sh --harden-ssh` | закрыть вход по паролю и root-вход в SSH (сначала проверьте вход по ключу!) |
+| `./run.sh --check` | любые другие параметры уходят в `ansible-playbook`, например `-e admin_user=alice` |
+
+Мастер сам подсказывает значения: ваш IP (если вы подключены по SSH), домашнюю
+подсеть, пользователя, вызвавшего `sudo`. Ответы он проверяет (имя пользователя,
+IP, CIDR, порты) и записывает файл с правами `600`. Файл можно править руками —
+все переменные описаны в `vars.example.yml` и в разделе «Переменные». Файл
+`vars.local.yml` в `.gitignore` и в репозиторий не попадёт.
 
 ## Запуск на домашнем компьютере или домашнем сервере
 
@@ -82,39 +100,33 @@ sudo dnf install -y git                                 # RHEL-семейств�
 git clone https://github.com/FlexEbat/easy-ansible.git
 cd easy-ansible
 
-# 3. свои настройки (см. подсказки ниже)
-cp vars.example.yml vars.local.yml
-nano vars.local.yml
+# 3. запуск: ответьте на вопросы мастера, Ansible run.sh поставит сам
+sudo ./run.sh
 
-# 4. запуск; Ansible и нужные коллекции run.sh поставит сам
-sudo ./run.sh -e admin_user="$USER" -e @vars.local.yml
-
-# 5. проверка
+# 4. проверка
 sudo ./verify.sh
 ```
 
-Что заполнить в `vars.local.yml` для дома:
+На вопросы мастера для дома разумно отвечать так:
 
-```yaml
-crowdsec_whitelist_cidrs: ["192.168.1.0/24"]   # ваша домашняя сеть: её CrowdSec не банит
-firewall_allowed_ports:                        # то, к чему должны подключаться из дома
-  - {port: 445, proto: tcp, from: 192.168.1.0/24}   # например, Samba
-docker_default_bind_ip: 127.0.0.1              # порты контейнеров только для самой машины
-# disable_ipv6: false                          # раскомментируйте, если IPv6 нужен
-```
+| Вопрос | Ответ |
+|---|---|
+| Что настраиваем | `1` — домашний компьютер |
+| Пользователь-администратор | ваш логин (мастер предлагает его сам) |
+| Ваши IP / подсети | домашняя сеть (подсказывается автоматически): CrowdSec не будет её банить |
+| Порты | те, к которым подключаются из дома (например, `445` для Samba); мастер предложит открыть их только для локальной сети |
+| Отключить IPv6 | `n`, если он нужен вашей сети |
+| Docker только на localhost | `y` |
 
 Что учесть:
 
-- **`-e admin_user="$USER"` обязателен.** Под `sudo` Ansible считает, что он
-  `root`; без этого проверка sudo и группа `docker` относились бы к `root`.
-  Пользователь уже есть в системе, пароль и ключи задавать не нужно.
 - **Firewall закроет входящие подключения из локальной сети** (Samba, Plex,
-  Syncthing, KDE Connect и т. п.). Откройте нужное в `firewall_allowed_ports`
-  с ограничением `from: ваша сеть`.
+  Syncthing, KDE Connect и т. п.). Откройте нужное в вопросе про порты; для
+  ограничения источника в `vars.local.yml` есть поле `from`.
 - **mDNS/LLMNR в `systemd-resolved` отключаются.** Обнаружение `*.local` через
   resolved перестанет работать (Avahi это не затрагивает).
-- **Docker обходит firewall:** `docker_default_bind_ip: 127.0.0.1` делает порты
-  контейнеров доступными только локально; наружу публикуйте явно
+- **Docker обходит firewall:** ответ `y` на вопрос про localhost делает порты
+  контейнеров доступными только самой машине; наружу публикуйте явно
   (`"192.168.1.10:8080:80"` в compose).
 - **Перезагрузитесь после первого запуска**, если в итогах
   `Reboot required: True`: новое ядро и отключение IPv6 вступают в силу только
@@ -135,39 +147,33 @@ docker_default_bind_ip: 127.0.0.1              # порты контейнеро
 apt-get update && apt-get install -y git               # Debian/Ubuntu
 # dnf install -y git                                    # RHEL-семейство
 
-# 2. код и настройки
+# 2. код
 git clone https://github.com/FlexEbat/easy-ansible.git
 cd easy-ansible
-cp vars.example.yml vars.local.yml
-nano vars.local.yml
 
-# 3. запуск
-./run.sh -e @vars.local.yml
+# 3. запуск: мастер задаст вопросы, затем начнётся настройка
+./run.sh
 
 # 4. проверка
 ./verify.sh
 ```
 
-Минимальный `vars.local.yml` для сервера:
+Ответы для сервера:
 
-```yaml
-admin_user: admin                         # создаётся, если его нет
-admin_user_authorized_keys:
-  - ssh-ed25519 AAAA... me@laptop         # ваш публичный ключ (cat ~/.ssh/id_ed25519.pub)
-admin_user_sudo_nopasswd: true            # у key-only пользователя нет пароля для sudo
-crowdsec_whitelist_ips: ["203.0.113.5"]   # ваш IP для управления, чтобы не забанили
-crowdsec_whitelist_cidrs: []
-firewall_allowed_ports:
-  - {port: 80}
-  - {port: 443}
-docker_default_bind_ip: 127.0.0.1         # порты контейнеров не торчат в интернет
-# auto_reboot: true                       # перезагружаться самому после обновлений ядра
-```
+| Вопрос | Ответ |
+|---|---|
+| Что настраиваем | `2` — сервер |
+| Пользователь-администратор | например, `admin` (создастся, если его нет) |
+| Ключ | ваш публичный ключ (`cat ~/.ssh/id_ed25519.pub` на вашей машине) или путь к `.pub` |
+| Ваши IP | ваш адрес для управления (если вы подключены по SSH, мастер подставит его сам) |
+| Порты | например, `80 443` |
+| Docker только на localhost | `y` |
+| Автоперезагрузка | `n` или `y`, если нужны ночные перезагрузки после обновлений ядра |
 
-> Без `admin_user_authorized_keys` (или `admin_user_password_hash`) новый
-> пользователь создаётся **заблокированным** и войти им нельзя. А без
-> `admin_user_sudo_nopasswd: true` пользователь без пароля не сможет выполнить
-> `sudo`. Ключ и пароль/`NOPASSWD` нужны вместе.
+Если вы дали ключ новому пользователю, мастер включает ему `sudo` без пароля: у
+учётки, которая входит по ключу, пароля нет. Без ключа мастер предложит задать
+пароль; если не задать ни ключ, ни пароль, пользователь создаётся
+**заблокированным**, и войти им нельзя.
 
 **Закройте вход по паролю** (второй запуск). Сначала проверьте вход по ключу в
 **новой** терминальной сессии, текущую не закрывайте:
@@ -179,8 +185,7 @@ ssh admin@203.0.113.10        # должно пустить по ключу, б�
 Затем на сервере:
 
 ```bash
-./run.sh -e @vars.local.yml \
-  -e ssh_harden=true -e ssh_password_auth=false -e ssh_permit_root_login=no
+./run.sh --harden-ssh
 ```
 
 Плейбук откажется отключать пароли, если у `admin_user` нет ключей в
@@ -196,7 +201,9 @@ SSH-доступ к серверу с `sudo`.
 git clone https://github.com/FlexEbat/easy-ansible.git
 cd easy-ansible
 ansible-galaxy collection install -r requirements.yml
-cp vars.example.yml vars.local.yml && nano vars.local.yml
+
+# настройки: мастер создаст vars.local.yml (root не нужен)
+./run.sh --wizard-only
 
 # собственный inventory
 cat > prod.ini <<'EOF'
@@ -211,20 +218,23 @@ scp verify.sh admin@203.0.113.10:/tmp/
 ssh -t admin@203.0.113.10 'sudo bash /tmp/verify.sh'
 ```
 
+- В мастере на ноутбуке отвечайте про **сервер**: логин администратора на
+  сервере, ключ, адреса. Подсказки «ваш IP» и «домашняя подсеть» берутся с
+  ноутбука, проверьте их.
 - **Используйте свой `prod.ini`, а не `inventory.ini`.** В `inventory.ini` есть
   группа `[local]`, а в плейбуке `hosts: all`: запуск с ним настроил бы заодно и
   ваш ноутбук.
 - `-K` запрашивает пароль `sudo` для `ansible_user` (не нужен при
   `admin_user_sudo_nopasswd: true`).
-- `admin_user` по умолчанию — это `ansible_user` (пользователь, под которым
-  Ansible заходит на сервер), а не `$USER` ноутбука.
+- Закрыть вход по паролю: добавьте к команде
+  `-e ssh_harden=true -e ssh_password_auth=false -e ssh_permit_root_login=no`.
 - Дополнительно проверьте firewall **у хостера** (облачные security groups):
   порты должны быть открыты и там.
 
 ## Повторный запуск и изменение настроек
 
-Измените `vars.local.yml` и запустите ту же команду ещё раз: применятся только
-различия. Примеры:
+Отредактируйте `vars.local.yml` (или пройдите мастер заново: `./run.sh --wizard`)
+и запустите `sudo ./run.sh` ещё раз: применятся только различия. Примеры:
 
 | Что нужно | Как |
 |---|---|
@@ -243,7 +253,7 @@ ssh -t admin@203.0.113.10 'sudo bash /tmp/verify.sh'
 
 ```bash
 tar -C "$HOME" -czf - easy-ansible | lxc exec linux-lab -- bash -lc 'tar -xzf - -C /root'
-lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./run.sh -e admin_user=labadmin'
+lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./run.sh --no-wizard -e admin_user=labadmin'
 lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 ```
 
@@ -313,8 +323,10 @@ sudo ./verify.sh
 
 ## Переменные
 
-Свои значения удобно держать в `vars.local.yml` (шаблон — `vars.example.yml`) и
-подключать ключом `-e @vars.local.yml`.
+Свои значения хранятся в `vars.local.yml`: его создаёт мастер `./run.sh`, а
+вручную можно править по образцу `vars.example.yml`. `run.sh` подключает файл
+сам (`-e @vars.local.yml`); при прямом вызове `ansible-playbook` добавьте этот
+ключ вручную.
 
 Общие переменные (`admin_user*`, `firewall_allowed_ports`, определение ОС)
 лежат в `group_vars/all.yml`. Всё, что относится к одной роли, — в
@@ -342,7 +354,7 @@ sudo ./verify.sh
 | `kernel_log_martians` | `0` | логировать martian-пакеты |
 | `zram_percent` / `zram_algorithm` / `zram_priority` | `25` / `zstd` / `100` | параметры zram |
 | `crowdsec_whitelist_ips` | `[]` | IP, которые CrowdSec никогда не заблокирует |
-| `crowdsec_whitelist_cidrs` | `[]` | подсети-исключения (в `inventory.ini` для лаборатории задан `192.168.1.0/24`) |
+| `crowdsec_whitelist_cidrs` | `[]` | подсети-исключения (например, домашняя сеть) |
 | `docker_service_enabled` | `true` | включает/выключает Docker |
 | `docker_add_admin_to_group` | `true` | добавить `admin_user` в группу `docker` |
 | `docker_default_bind_ip` | `""` | адрес по умолчанию для опубликованных портов; `127.0.0.1` закрывает их от интернета |
@@ -520,8 +532,9 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 ├── site.yml
 ├── group_vars/all.yml
 ├── requirements.yml
-├── run.sh
-├── vars.example.yml           # шаблон своих настроек (копия: vars.local.yml)
+├── run.sh                     # установка Ansible + запуск (читает/создаёт vars.local.yml)
+├── wizard.sh                  # мастер вопросов, создаёт vars.local.yml
+├── vars.example.yml           # справочник по всем настройкам
 ├── verify.sh
 ├── .ansible-lint
 ├── .yamllint
@@ -556,7 +569,7 @@ molecule test -p ubuntu2404
 molecule test -p rockylinux9
 molecule test -p rockylinux8   # best effort
 
-shellcheck verify.sh run.sh
+shellcheck verify.sh run.sh wizard.sh
 ```
 
 Платформы: `geerlingguy/docker-debian13-ansible`,

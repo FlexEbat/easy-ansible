@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run shellcheck
-        run: shellcheck verify.sh run.sh
+        run: shellcheck verify.sh run.sh wizard.sh
 
   molecule:
     name: Molecule (${{ matrix.platform }})
