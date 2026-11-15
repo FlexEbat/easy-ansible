@@ -9,6 +9,7 @@
   register: resolved_unit
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Ensure the systemd-resolved drop-in directory exists
   ansible.builtin.file:
@@ -37,6 +38,31 @@
     - "'systemd-resolved.service' in resolved_unit.stdout"
   notify: Restart systemd-resolved
 
+# ---------------------------------------------------------------------------
+# journald: the default is 10% of the filesystem, which is a lot on a small VPS
+# ---------------------------------------------------------------------------
+- name: Ensure the journald drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ base_journald_config | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: base_journald_max_use | length > 0
+
+- name: Limit the journal size
+  ansible.builtin.copy:
+    dest: "{{ base_journald_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      [Journal]
+      SystemMaxUse={{ base_journald_max_use }}
+  when: base_journald_max_use | length > 0
+  notify: Restart systemd-journald
+
 - name: Apply the Debian/Ubuntu base configuration
   ansible.builtin.include_tasks: debian.yml
   when: is_debian | bool
@@ -44,3 +70,20 @@
 - name: Apply the RHEL family base configuration
   ansible.builtin.include_tasks: rhel.yml
   when: is_rhel | bool
+
+# ---------------------------------------------------------------------------
+# Time synchronisation
+# ---------------------------------------------------------------------------
+- name: Enable and start the time synchronisation service
+  ansible.builtin.systemd_service:
+    name: "{{ base_time_sync_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - base_time_sync | bool
+    - not (is_container | bool)
+
+- name: Install trippy
+  ansible.builtin.include_tasks: trippy.yml
+  when: base_install_trippy | bool

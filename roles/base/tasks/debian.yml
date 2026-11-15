@@ -16,7 +16,9 @@
 
 - name: Install required packages
   ansible.builtin.apt:
-    name: "{{ base_packages_common + base_packages_debian }}"
+    name: >-
+      {{ base_packages_common + base_packages_debian
+         + (base_packages_time_sync if base_time_sync | bool else []) }}
     state: present
     dpkg_options: "force-confdef,force-confold"
   environment:
@@ -37,12 +39,24 @@
       APT::Periodic::Unattended-Upgrade "{{ '1' if auto_updates_enabled | bool else '0' }}";
       APT::Periodic::AutocleanInterval "7";
 
+- name: Configure the unattended-upgrades reboot behaviour
+  ansible.builtin.copy:
+    dest: "{{ apt_unattended_reboot_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by Ansible
+      Unattended-Upgrade::Automatic-Reboot "{{ 'true' if auto_reboot | bool else 'false' }}";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ auto_reboot_time }}";
+
 - name: Check for the unattended-upgrades service  # noqa: command-instead-of-module
   ansible.builtin.command:
     cmd: systemctl list-unit-files unattended-upgrades.service
   register: unattended_upgrades_unit
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Enable or disable unattended-upgrades
   ansible.builtin.systemd_service:
@@ -65,102 +79,3 @@
 - name: Remember whether a reboot is required
   ansible.builtin.set_fact:
     reboot_required: "{{ reboot_required_file.stat.exists }}"
-
-# ---------------------------------------------------------------------------
-# Trippy: Debian 13 ships it. Ubuntu and any Debian release without the
-# package get the upstream build (.deb on amd64, tarball on other
-# architectures). The upstream artifacts are pinned by SHA-256.
-# ---------------------------------------------------------------------------
-- name: Check whether trippy is already installed
-  ansible.builtin.command:
-    cmd: sh -c 'command -v trippy || command -v trip'
-  register: trippy_check
-  changed_when: false
-  failed_when: false
-
-- name: Check whether the distribution repository provides trippy
-  ansible.builtin.command:
-    cmd: apt-cache show trippy
-  register: trippy_apt_available
-  changed_when: false
-  failed_when: false
-  check_mode: false
-  when: trippy_check.rc != 0
-
-- name: Decide how trippy should be installed
-  ansible.builtin.set_fact:
-    trippy_install_from_distro: >-
-      {{ trippy_check.rc != 0
-         and trippy_apt_available is defined
-         and trippy_apt_available.rc == 0 }}
-    trippy_install_from_upstream: >-
-      {{ trippy_check.rc != 0
-         and (trippy_apt_available is not defined or trippy_apt_available.rc != 0) }}
-
-- name: Install trippy from the distribution repository
-  ansible.builtin.apt:
-    name: trippy
-    state: present
-  environment:
-    DEBIAN_FRONTEND: noninteractive
-  when: trippy_install_from_distro | bool
-
-- name: Download the upstream trippy .deb (amd64)
-  ansible.builtin.get_url:
-    url: "{{ trippy_deb_url }}"
-    dest: "{{ trippy_deb_path }}"
-    checksum: "{{ trippy_deb_checksum }}"
-    mode: "0644"
-  when:
-    - trippy_install_from_upstream | bool
-    - ansible_facts['architecture'] == 'x86_64'
-
-- name: Install the upstream trippy .deb (amd64)
-  ansible.builtin.apt:
-    deb: "{{ trippy_deb_path }}"
-    state: present
-  environment:
-    DEBIAN_FRONTEND: noninteractive
-  when:
-    - trippy_install_from_upstream | bool
-    - ansible_facts['architecture'] == 'x86_64'
-
-- name: Download the upstream trippy tarball (non-amd64)
-  ansible.builtin.get_url:
-    url: "{{ trippy_tarball_url }}"
-    dest: "{{ trippy_tarball_path }}"
-    checksum: "{{ trippy_tarball_checksum }}"
-    mode: "0644"
-  when:
-    - trippy_install_from_upstream | bool
-    - ansible_facts['architecture'] != 'x86_64'
-
-- name: Ensure the trippy extraction directory exists (non-amd64)
-  ansible.builtin.file:
-    path: "{{ trippy_extract_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  when:
-    - trippy_install_from_upstream | bool
-    - ansible_facts['architecture'] != 'x86_64'
-
-- name: Install the upstream trippy binary (non-amd64)
-  when:
-    - trippy_install_from_upstream | bool
-    - ansible_facts['architecture'] != 'x86_64'
-  block:
-    - name: Extract the trippy tarball (non-amd64)
-      ansible.builtin.unarchive:
-        src: "{{ trippy_tarball_path }}"
-        dest: "{{ trippy_extract_dir }}"
-        remote_src: true
-        creates: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-
-    - name: Copy the trippy binary into /usr/local/bin (non-amd64)
-      ansible.builtin.copy:
-        src: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-        dest: /usr/local/bin/trip
-        remote_src: true
-        mode: "0755"

@@ -1,0 +1,7 @@
+---
+ufw_logging: low
+# Empty = use the firewalld default zone. Set explicitly to override.
+firewalld_zone: ""
+# UFW only: rate-limit new SSH connections (6 in 30 s per source address)
+# instead of a plain allow. Useful while password login is enabled.
+firewall_ssh_rate_limit: true

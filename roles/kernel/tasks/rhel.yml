@@ -7,41 +7,57 @@
     path: /usr/sbin/grubby
   register: grubby_check
 
-- name: Check whether the kernel command line already disables IPv6
+- name: Read the kernel command lines
   ansible.builtin.command:
     cmd: grubby --info=ALL
   register: grubby_info
   changed_when: false
   failed_when: false
+  check_mode: false
   when:
-    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - not (is_container | bool)
     - grubby_check.stat.exists
 
 - name: Add the IPv6-disable kernel parameter with grubby
   ansible.builtin.command:
     cmd: grubby --update-kernel=ALL --args="ipv6.disable=1"
   when:
-    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - disable_ipv6 | bool
+    - not (is_container | bool)
     - grubby_check.stat.exists
     - "'ipv6.disable=1' not in (grubby_info.stdout | default(''))"
   changed_when: true
 
+- name: Remove the IPv6-disable kernel parameter with grubby when IPv6 stays enabled
+  ansible.builtin.command:
+    cmd: grubby --update-kernel=ALL --remove-args="ipv6.disable=1"
+  when:
+    - not (disable_ipv6 | bool)
+    - not (is_container | bool)
+    - grubby_check.stat.exists
+    - "'ipv6.disable=1' in (grubby_info.stdout | default(''))"
+  changed_when: true
+
+# Without grubby the parameter is appended to the existing GRUB_CMDLINE_LINUX
+# value; the other arguments (root=, crashkernel=, ...) are preserved.
 - name: Fall back to /etc/default/grub when grubby is unavailable
   ansible.builtin.lineinfile:
     path: /etc/default/grub
-    regexp: '^GRUB_CMDLINE_LINUX='
-    line: 'GRUB_CMDLINE_LINUX="ipv6.disable=1"'
-    state: present
+    regexp: '^(GRUB_CMDLINE_LINUX=")(?!.*\bipv6\.disable=1\b)(.*)"$'
+    line: '\1\2 ipv6.disable=1"'
+    backrefs: true
   register: grub_default
   when:
-    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - disable_ipv6 | bool
+    - not (is_container | bool)
     - not grubby_check.stat.exists
 
 - name: Regenerate the GRUB configuration
   ansible.builtin.command:
     cmd: /usr/sbin/grub2-mkconfig -o /boot/grub2/grub.cfg
   when:
-    - ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd']
+    - disable_ipv6 | bool
+    - not (is_container | bool)
     - not grubby_check.stat.exists
     - grub_default is changed
   changed_when: true
@@ -50,8 +66,10 @@
   ansible.builtin.debug:
     msg: >-
       IPv6 is disabled through {{ ipv6_sysctl_file }} at runtime, but the kernel
-      command line cannot be changed inside {{ ansible_virtualization_type }}.
-  when: ansible_virtualization_type in ['lxc', 'docker', 'podman', 'containerd']
+      command line cannot be changed inside {{ ansible_facts['virtualization_type'] }}.
+  when:
+    - disable_ipv6 | bool
+    - is_container | bool
 
 # ---------------------------------------------------------------------------
 # zram (zram-generator)
@@ -77,7 +95,7 @@
   changed_when: false
   failed_when: false
   check_mode: false
-  when: ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+  when: not (is_container | bool)
 
 - name: Check for a zram device
   ansible.builtin.stat:
@@ -89,26 +107,25 @@
 - name: Remember whether zram is usable on this host
   ansible.builtin.set_fact:
     zram_usable: >-
-      {{ ansible_virtualization_type not in
-         ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+      {{ not (is_container | bool)
          and ((zram_modprobe.rc | default(1)) == 0
               or zram_device.stat.exists) }}
 
 - name: Reload systemd so zram-generator is picked up
   ansible.builtin.systemd_service:
     daemon_reload: true
-  when: zram_usable
+  when: zram_usable | bool
 
 - name: Start the zram setup service
   ansible.builtin.systemd_service:
     name: "{{ zram_generator_service }}"
     state: "{{ 'restarted' if zram_generator_config_result is changed else 'started' }}"
-  when: zram_usable
+  when: zram_usable | bool
 
 - name: Explain why zram was not started
   ansible.builtin.debug:
     msg: >-
       The zram configuration is in {{ zram_generator_config }}, but zram is
       unavailable or cannot be managed inside this
-      {{ ansible_virtualization_type }} environment.
-  when: not zram_usable
+      {{ ansible_facts['virtualization_type'] | default('unknown') }} environment.
+  when: not (zram_usable | bool)

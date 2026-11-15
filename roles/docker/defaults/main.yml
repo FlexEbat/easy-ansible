@@ -1,0 +1,53 @@
+---
+docker_repo_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else 'debian' }}"
+# Docker publishes a separate repository for RHEL derivatives. AlmaLinux,
+# Rocky and CentOS Stream use the CentOS repository; RHEL itself uses rhel.
+docker_rhel_repo_flavor: >-
+  {{ 'centos' if ansible_facts['distribution'] in
+     ['AlmaLinux', 'Rocky', 'CentOS', 'CentOS Stream']
+     else 'rhel' }}
+
+docker_service_enabled: true
+docker_daemon_config: /etc/docker/daemon.json
+docker_log_max_size: 10m
+docker_log_max_file: "3"
+docker_live_restore: true
+# Default address for published ports ("-p 80:80" in docker run/compose). Docker
+# publishes ports through its own firewall rules and bypasses UFW/firewalld, so
+# the default 0.0.0.0 exposes them to the internet. Set it to "127.0.0.1" to make
+# every container reachable from the host only unless a compose file binds an
+# address explicitly (for example "0.0.0.0:443:443"). Empty = Docker default.
+docker_default_bind_ip: ""
+# Default "no-new-privileges" for all containers: processes cannot gain more
+# privileges through setuid binaries. Off by default because some images rely on
+# them; a single container can still opt in with security_opt.
+docker_no_new_privileges: false
+# Add admin_user to the docker group (requires a new login to take effect).
+docker_add_admin_to_group: true
+# Packages from the distribution that conflict with Docker CE.
+docker_conflicting_packages_debian:
+  - docker.io
+  - docker-doc
+  - docker-compose
+  - docker-buildx
+  - docker-cli
+  - podman-docker
+  - containerd
+  - runc
+docker_conflicting_packages_rhel:
+  - docker
+  - docker-client
+  - docker-client-latest
+  - docker-common
+  - docker-latest
+  - docker-latest-logrotate
+  - docker-logrotate
+  - docker-engine
+  - podman
+  - runc
+docker_ce_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin

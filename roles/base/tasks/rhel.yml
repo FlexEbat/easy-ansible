@@ -35,6 +35,7 @@
   ansible.builtin.dnf:
     name: >-
       {{ base_packages_common + base_packages_rhel
+         + (base_packages_time_sync if base_time_sync | bool else [])
          + (['curl'] if 'curl' not in ansible_facts.packages
             and 'curl-minimal' not in ansible_facts.packages else []) }}
     state: present
@@ -55,6 +56,7 @@
       random_sleep = 0
       download_updates = yes
       apply_updates = {{ 'yes' if auto_updates_enabled | bool else 'no' }}
+      reboot = {{ 'when-needed' if auto_reboot | bool else 'never' }}
 
       [emitters]
       emit_via = stdio
@@ -69,6 +71,7 @@
   register: dnf_automatic_unit
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Enable or disable the dnf-automatic timer
   ansible.builtin.systemd_service:
@@ -89,80 +92,8 @@
   register: needs_restarting
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Remember whether a reboot is required
   ansible.builtin.set_fact:
     reboot_required: "{{ needs_restarting.rc | default(0) == 1 }}"
-
-# ---------------------------------------------------------------------------
-# Trippy is not packaged for the RHEL family (including EPEL), so install the
-# upstream release. x86_64 has an RPM; other architectures use the tarball.
-# The artifacts are pinned by SHA-256.
-# ---------------------------------------------------------------------------
-- name: Check whether trippy is already installed
-  ansible.builtin.command:
-    cmd: sh -c 'command -v trippy || command -v trip'
-  register: trippy_check
-  changed_when: false
-  failed_when: false
-
-- name: Download the trippy RPM
-  ansible.builtin.get_url:
-    url: "{{ trippy_rpm_url }}"
-    dest: "/tmp/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
-    checksum: "{{ trippy_rpm_checksum }}"
-    mode: "0644"
-  when:
-    - trippy_check.rc != 0
-    - trippy_rpm_arch == 'x86_64'
-
-# The upstream RPM is not signed, so dnf's package signature check cannot be
-# used. Integrity is enforced by the pinned SHA-256 checksum above.
-- name: Install the trippy RPM
-  ansible.builtin.dnf:
-    name: "/tmp/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
-    state: present
-    disable_gpg_check: true
-  when:
-    - trippy_check.rc != 0
-    - trippy_rpm_arch == 'x86_64'
-
-- name: Download the trippy tarball (non-x86_64)
-  ansible.builtin.get_url:
-    url: "{{ trippy_tarball_url }}"
-    dest: "{{ trippy_tarball_path }}"
-    checksum: "{{ trippy_tarball_checksum }}"
-    mode: "0644"
-  when:
-    - trippy_check.rc != 0
-    - trippy_rpm_arch != 'x86_64'
-
-- name: Ensure the trippy extraction directory exists (non-x86_64)
-  ansible.builtin.file:
-    path: "{{ trippy_extract_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  when:
-    - trippy_check.rc != 0
-    - trippy_rpm_arch != 'x86_64'
-
-- name: Install the trippy binary (non-x86_64)
-  when:
-    - trippy_check.rc != 0
-    - trippy_rpm_arch != 'x86_64'
-  block:
-    - name: Extract the trippy tarball (non-x86_64)
-      ansible.builtin.unarchive:
-        src: "{{ trippy_tarball_path }}"
-        dest: "{{ trippy_extract_dir }}"
-        remote_src: true
-        creates: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-
-    - name: Copy the trippy binary into /usr/local/bin (non-x86_64)
-      ansible.builtin.copy:
-        src: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-        dest: /usr/local/bin/trip
-        remote_src: true
-        mode: "0755"

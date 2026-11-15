@@ -1,0 +1,23 @@
+---
+# Optional sshd hardening. OFF by default: sshd keeps the distribution
+# configuration (port 22, password login allowed). When enabled, a drop-in
+# /etc/ssh/sshd_config.d/00-ansible-hardening.conf is written (it is read
+# first, so it wins over other drop-ins such as cloud-init's). The SSH port is
+# never changed.
+ssh_harden: false
+# Set to false for key-only access. The playbook refuses to disable passwords
+# unless the admin user already has a non-empty authorized_keys file
+# (see admin_user_authorized_keys).
+ssh_password_auth: true
+# "no", "prohibit-password" (keys only) or "yes".
+ssh_permit_root_login: prohibit-password
+ssh_max_auth_tries: 4
+ssh_x11_forwarding: false
+ssh_dropin_file: /etc/ssh/sshd_config.d/00-ansible-hardening.conf
+ssh_service: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
+# OpenSSH 8.7 renamed ChallengeResponseAuthentication to
+# KbdInteractiveAuthentication; RHEL 8 still ships OpenSSH 8.0.
+ssh_kbd_interactive_option: >-
+  {{ 'KbdInteractiveAuthentication'
+     if ansible_facts['os_family'] == 'Debian' or ansible_facts['distribution_major_version'] | int >= 9
+     else 'ChallengeResponseAuthentication' }}

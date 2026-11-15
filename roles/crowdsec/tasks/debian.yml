@@ -16,10 +16,17 @@
     state: started
     daemon_reload: true
 
+- name: Check whether the auth log already exists
+  ansible.builtin.stat:
+    path: /var/log/auth.log
+  register: crowdsec_auth_log
+
+# Only when the file is missing, so a re-run does not add a log line every time.
 - name: Write an auth log entry so the file exists
   ansible.builtin.command:
     cmd: logger -p auth.info -t crowdsec-setup "rsyslog auth log initialized"
-  changed_when: false
+  changed_when: true
+  when: not crowdsec_auth_log.stat.exists
 
 - name: Wait for /var/log/auth.log to appear
   ansible.builtin.wait_for:

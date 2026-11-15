@@ -1,0 +1,6 @@
+---
+# A reload keeps existing sessions alive, so a remote run cannot cut itself off.
+- name: Reload ssh
+  ansible.builtin.systemd_service:
+    name: "{{ ssh_service }}"
+    state: reloaded

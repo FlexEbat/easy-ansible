@@ -1,0 +1,23 @@
+---
+# The sysctl files are managed with ansible.posix.sysctl (file only). The values
+# are applied here, once per changed file and never inside containers, whose
+# kernel settings belong to the host (IPv6 is per network namespace and is the
+# exception).
+- name: Apply BBR sysctl
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ bbr_sysctl_file }}"
+  changed_when: false
+  when: not (is_container | bool)
+
+- name: Apply sysctl hardening
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ sysctl_hardening_file }}"
+  changed_when: false
+  failed_when: false
+  when: not (is_container | bool)
+
+- name: Apply IPv6 sysctl
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ ipv6_sysctl_file }}"
+  changed_when: false
+  failed_when: false

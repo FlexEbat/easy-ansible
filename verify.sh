@@ -3,9 +3,11 @@
 # Post-install verification for the Ansible hardening playbook.
 # Run on the target after ansible-playbook:
 #
-#   ./verify.sh
+#   sudo ./verify.sh
 #
 # Supports Debian/Ubuntu (apt/UFW) and the RHEL family (dnf/firewalld).
+# The expected values come from /etc/ansible-setup-summary.json, so the checks
+# follow the variables the playbook was run with.
 # Exit code: 0 when every required check passes, 1 otherwise.
 
 set -u
@@ -27,8 +29,22 @@ if [ ! -r "$SUMMARY" ]; then
   exit 1
 fi
 
+# Scalar value of a summary key (booleans print as True/False, lists as Python).
 json_get() {
-  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$SUMMARY" "$1"
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$SUMMARY" "$1"
+}
+
+# True when the summary key is the boolean true.
+json_true() {
+  [ "$(json_get "$1")" = "True" ]
+}
+
+# True when FILE has a "key = value" line (spaces around "=" are optional,
+# ansible.posix.sysctl writes "key=value").
+conf_has() {
+  local file="$1" key="$2" value="$3"
+  local re="${key//./\\.}"
+  grep -Eq "^[[:space:]]*${re}[[:space:]]*=[[:space:]]*${value}[[:space:]]*$" "$file" 2>/dev/null
 }
 
 if command -v dpkg-query >/dev/null 2>&1; then
@@ -51,14 +67,18 @@ pkg_installed() {
 }
 
 ADMIN_USER=$(json_get admin_user)
-ADMIN_HOME=$(json_get admin_home)
 SUDO_GROUP=$(json_get sudo_group)
 FIREWALL_BACKEND=$(json_get firewall_backend)
+# Entries look like "80/tcp 443/udp".
 FIREWALL_ALLOWED_PORTS=$(python3 -c 'import json,sys; print(" ".join(str(p) for p in json.load(open(sys.argv[1])).get("firewall_allowed_ports", [])))' "$SUMMARY")
 CROWDSEC_BOUNCER_MODE=$(json_get crowdsec_bouncer_mode)
 CROWDSEC_BOUNCER_CONFIG=$(json_get crowdsec_bouncer_config)
 DOCKER_DAEMON_CONFIG=$(json_get docker_daemon_config)
-DOCKER_ADD_ADMIN_TO_GROUP=$(json_get docker_add_admin_to_group)
+DOCKER_DEFAULT_BIND_IP=$(json_get docker_default_bind_ip)
+JOURNALD_MAX_USE=$(json_get base_journald_max_use)
+RP_FILTER=$(json_get kernel_rp_filter)
+LOG_MARTIANS=$(json_get kernel_log_martians)
+SSH_PERMIT_ROOT_LOGIN=$(json_get ssh_permit_root_login)
 
 container_type=$(systemd-detect-virt --container 2>/dev/null || true)
 is_container() { [ -n "$container_type" ] && [ "$container_type" != "none" ]; }
@@ -72,9 +92,12 @@ info "extra_ports=${FIREWALL_ALLOWED_PORTS:-none}"
 
 section "Packages"
 if [ "$PKG_MANAGER" = "apt" ]; then
-  PACKAGES="sudo curl wget mtr git openssh-server ufw crowdsec crowdsec-firewall-bouncer zram-tools trippy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin unattended-upgrades rsyslog"
+  PACKAGES="sudo curl wget mtr git openssh-server ufw crowdsec crowdsec-firewall-bouncer zram-tools docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin unattended-upgrades rsyslog"
 else
   PACKAGES="sudo curl wget mtr git openssh-server firewalld crowdsec crowdsec-firewall-bouncer-nftables zram-generator docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin dnf-automatic yum-utils"
+fi
+if json_true base_time_sync; then
+  PACKAGES="$PACKAGES chrony"
 fi
 for pkg in $PACKAGES; do
   if pkg_installed "$pkg" || { [ "$pkg" = "curl" ] && pkg_installed curl-minimal; }; then
@@ -84,33 +107,51 @@ for pkg in $PACKAGES; do
   fi
 done
 
-# trippy may be a package (x86_64) or a plain binary on other architectures.
-if command -v trippy >/dev/null 2>&1 || command -v trip >/dev/null 2>&1; then
-  pass "trippy binary is available"
-else
-  fail "trippy binary is not available"
+# trippy is a distribution package, an upstream package or a plain binary
+# depending on the OS and architecture, so only the command is checked.
+if json_true base_install_trippy; then
+  if command -v trippy >/dev/null 2>&1 || command -v trip >/dev/null 2>&1; then
+    pass "trippy binary is available"
+  else
+    skip "trippy binary is not available (no pinned upstream build for $(uname -m)?)"
+  fi
 fi
 
 section "SSH"
-# SSH is left in its default configuration: port 22, password login allowed.
-# Only the two basics are verified so that a broken firewall or sshd change
-# is caught.
 if ss -ltnH "sport = :22" | grep -q .; then
-  pass "sshd is listening on the default port 22"
+  pass "sshd is listening on port 22"
 else
   fail "sshd is not listening on port 22"
-fi
-
-if sshd -T 2>/dev/null | grep -qx 'passwordauthentication yes'; then
-  pass "SSH password authentication is enabled"
-else
-  fail "SSH password authentication is not enabled"
 fi
 
 if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
   pass "sshd effective config uses port 22"
 else
   fail "sshd effective config does not use port 22"
+fi
+
+if json_true ssh_harden; then
+  if json_true ssh_password_auth; then
+    expected_pw="yes"
+  else
+    expected_pw="no"
+  fi
+  if sshd -T 2>/dev/null | grep -qx "passwordauthentication $expected_pw"; then
+    pass "SSH password authentication is '$expected_pw' as configured"
+  else
+    fail "SSH password authentication is not '$expected_pw'"
+  fi
+
+  # sshd -T reports "prohibit-password" as "without-password".
+  expected_root="$SSH_PERMIT_ROOT_LOGIN"
+  [ "$expected_root" = "prohibit-password" ] && expected_root="(prohibit-password|without-password)"
+  if sshd -T 2>/dev/null | grep -Eqx "permitrootlogin $expected_root"; then
+    pass "SSH PermitRootLogin is $SSH_PERMIT_ROOT_LOGIN as configured"
+  else
+    fail "SSH PermitRootLogin is not $SSH_PERMIT_ROOT_LOGIN"
+  fi
+else
+  info "SSH hardening is disabled: sshd keeps the distribution configuration"
 fi
 
 section "Firewall ($FIREWALL_BACKEND)"
@@ -127,17 +168,22 @@ if [ "$FIREWALL_BACKEND" = "ufw" ]; then
     fail "UFW default incoming policy is not deny"
   fi
 
-  if ufw status 2>/dev/null | grep -qE '^22/tcp[[:space:]]+ALLOW'; then
-    pass "UFW allows SSH on the default port 22"
+  if json_true firewall_ssh_rate_limit; then
+    ssh_action="LIMIT"
   else
-    fail "UFW does not allow SSH on port 22"
+    ssh_action="ALLOW"
+  fi
+  if ufw status 2>/dev/null | grep -qE "^22/tcp[[:space:]]+${ssh_action}"; then
+    pass "UFW rule for SSH on port 22 is $ssh_action"
+  else
+    fail "UFW has no $ssh_action rule for SSH on port 22"
   fi
 
-  for port in $FIREWALL_ALLOWED_PORTS; do
-    if ufw status 2>/dev/null | grep -qE "^${port}/tcp[[:space:]]+ALLOW"; then
-      pass "UFW allows extra port $port/tcp"
+  for spec in $FIREWALL_ALLOWED_PORTS; do
+    if ufw status 2>/dev/null | grep -qE "^${spec}[[:space:]]+ALLOW"; then
+      pass "UFW allows extra port $spec"
     else
-      fail "UFW does not allow extra port $port/tcp"
+      fail "UFW does not allow extra port $spec"
     fi
   done
 else
@@ -154,11 +200,16 @@ else
     fail "firewalld does not allow the SSH service"
   fi
 
-  for port in $FIREWALL_ALLOWED_PORTS; do
-    if firewall-cmd --zone="$ZONE" --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "$port/tcp"; then
-      pass "firewalld allows extra port $port/tcp"
+  for spec in $FIREWALL_ALLOWED_PORTS; do
+    port="${spec%/*}"
+    proto="${spec#*/}"
+    # Ports without a source restriction are plain ports; restricted ones are
+    # rich rules.
+    if firewall-cmd --zone="$ZONE" --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "$spec" ||
+       firewall-cmd --zone="$ZONE" --list-rich-rules 2>/dev/null | grep -q "port=\"$port\" protocol=\"$proto\""; then
+      pass "firewalld allows extra port $spec"
     else
-      fail "firewalld does not allow extra port $port/tcp"
+      fail "firewalld does not allow extra port $spec"
     fi
   done
 fi
@@ -250,6 +301,16 @@ if [ "$PKG_MANAGER" = "apt" ]; then
   else
     skip "unattended-upgrades service is not active (timer-based or missing unit)"
   fi
+  if json_true auto_reboot; then
+    reboot_flag="true"
+  else
+    reboot_flag="false"
+  fi
+  if grep -q "Automatic-Reboot \"$reboot_flag\"" /etc/apt/apt.conf.d/52ansible-unattended-upgrades 2>/dev/null; then
+    pass "unattended-upgrades automatic reboot is $reboot_flag"
+  else
+    fail "unattended-upgrades automatic reboot is not $reboot_flag"
+  fi
 else
   if grep -q '^apply_updates = yes' /etc/dnf/automatic.conf 2>/dev/null; then
     pass "dnf-automatic applies updates"
@@ -263,9 +324,31 @@ else
   fi
 fi
 
+section "Time synchronisation / journald"
+if json_true base_time_sync; then
+  if is_container; then
+    skip "time synchronisation is left to the host inside $container_type"
+  else
+    if [ "$PKG_MANAGER" = "apt" ]; then
+      time_unit="chrony"
+    else
+      time_unit="chronyd"
+    fi
+    systemctl is-active --quiet "$time_unit" && pass "$time_unit is active" || fail "$time_unit is not active"
+  fi
+fi
+
+if [ -n "$JOURNALD_MAX_USE" ]; then
+  if grep -q "^SystemMaxUse=$JOURNALD_MAX_USE" /etc/systemd/journald.conf.d/99-ansible.conf 2>/dev/null; then
+    pass "journald size limit is $JOURNALD_MAX_USE"
+  else
+    fail "journald size limit is not configured"
+  fi
+fi
+
 section "BBR / IPv6 / sysctl / zram"
-if grep -q '^net.core.default_qdisc = fq' /etc/sysctl.d/99-bbr.conf 2>/dev/null &&
-   grep -q '^net.ipv4.tcp_congestion_control = bbr' /etc/sysctl.d/99-bbr.conf 2>/dev/null; then
+if conf_has /etc/sysctl.d/99-bbr.conf net.core.default_qdisc fq &&
+   conf_has /etc/sysctl.d/99-bbr.conf net.ipv4.tcp_congestion_control bbr; then
   pass "BBR sysctl configuration is present"
 else
   fail "BBR sysctl configuration is incomplete"
@@ -280,13 +363,19 @@ else
   [ "$qdisc" = "fq" ] && pass "kernel default qdisc is fq" || fail "kernel default qdisc is '$qdisc' (expected fq)"
 fi
 
-if [ -f /etc/sysctl.d/99-hardening.conf ] &&
-   grep -q '^net.ipv4.conf.all.rp_filter = 1' /etc/sysctl.d/99-hardening.conf &&
-   grep -q '^net.ipv4.tcp_syncookies = 1' /etc/sysctl.d/99-hardening.conf &&
-   grep -q '^net.ipv4.conf.all.accept_redirects = 0' /etc/sysctl.d/99-hardening.conf; then
+HARDENING=/etc/sysctl.d/99-hardening.conf
+if [ -f "$HARDENING" ] &&
+   conf_has "$HARDENING" net.ipv4.conf.all.rp_filter "$RP_FILTER" &&
+   conf_has "$HARDENING" net.ipv4.tcp_syncookies 1 &&
+   conf_has "$HARDENING" net.ipv4.conf.all.accept_redirects 0 &&
+   conf_has "$HARDENING" net.ipv4.conf.all.log_martians "$LOG_MARTIANS"; then
   pass "network hardening sysctl configuration is present"
 else
   fail "network hardening sysctl configuration is incomplete"
+fi
+
+if grep -q 'tcp_syn_retries' "$HARDENING" 2>/dev/null; then
+  fail "obsolete net.ipv4.tcp_syn_retries is still set in $HARDENING"
 fi
 
 if is_container; then
@@ -295,49 +384,57 @@ else
   rp=$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null || true)
   sc=$(cat /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null || true)
   ar=$(cat /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null || true)
-  [ "$rp" = "1" ] && pass "rp_filter is enabled" || fail "rp_filter is '$rp' (expected 1)"
+  [ "$rp" = "$RP_FILTER" ] && pass "rp_filter is $RP_FILTER" || fail "rp_filter is '$rp' (expected $RP_FILTER)"
   [ "$sc" = "1" ] && pass "SYN cookies are enabled" || fail "tcp_syncookies is '$sc' (expected 1)"
   [ "$ar" = "0" ] && pass "ICMP redirects are ignored" || fail "accept_redirects is '$ar' (expected 0)"
 fi
 
-if grep -q '^net.ipv6.conf.all.disable_ipv6 = 1' /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null; then
-  pass "IPv6-disable sysctl configuration is present"
-else
-  fail "IPv6-disable sysctl configuration is missing"
-fi
+if json_true disable_ipv6; then
+  if conf_has /etc/sysctl.d/99-disable-ipv6.conf net.ipv6.conf.all.disable_ipv6 1; then
+    pass "IPv6-disable sysctl configuration is present"
+  else
+    fail "IPv6-disable sysctl configuration is missing"
+  fi
 
-if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo '?')" = "1" ]; then
-  pass "IPv6 is disabled at runtime"
-elif [ ! -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ] &&
-     grep -qw 'ipv6.disable=1' /proc/cmdline 2>/dev/null; then
-  pass "IPv6 is disabled by the kernel command line (sysctl is absent after reboot)"
-else
-  fail "IPv6 is not disabled at runtime"
-fi
+  if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo '?')" = "1" ]; then
+    pass "IPv6 is disabled at runtime"
+  elif [ ! -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ] &&
+       grep -qw 'ipv6.disable=1' /proc/cmdline 2>/dev/null; then
+    pass "IPv6 is disabled by the kernel command line (sysctl is absent after reboot)"
+  else
+    fail "IPv6 is not disabled at runtime"
+  fi
 
-if [ "$PKG_MANAGER" = "apt" ]; then
-  if [ -f /etc/default/grub.d/99-disable-ipv6.cfg ]; then
-    pass "GRUB IPv6-disable drop-in is present"
-    if [ -f /boot/grub/grub.cfg ] && grep -q 'ipv6.disable=1' /boot/grub/grub.cfg; then
-      pass "GRUB configuration contains ipv6.disable=1"
-    elif [ -f /boot/grub/grub.cfg ]; then
-      fail "GRUB configuration does not contain ipv6.disable=1"
+  if [ "$PKG_MANAGER" = "apt" ]; then
+    if [ -f /etc/default/grub.d/99-disable-ipv6.cfg ]; then
+      pass "GRUB IPv6-disable drop-in is present"
+      if [ -f /boot/grub/grub.cfg ] && grep -q 'ipv6.disable=1' /boot/grub/grub.cfg; then
+        pass "GRUB configuration contains ipv6.disable=1"
+      elif [ -f /boot/grub/grub.cfg ]; then
+        fail "GRUB configuration does not contain ipv6.disable=1"
+      else
+        skip "GRUB is not installed (container)"
+      fi
     else
-      skip "GRUB is not installed (container)"
+      fail "GRUB IPv6-disable drop-in is missing"
     fi
   else
-    fail "GRUB IPv6-disable drop-in is missing"
+    if is_container; then
+      skip "kernel command line cannot be changed inside $container_type"
+    else
+      if grubby --info=ALL 2>/dev/null | grep -q 'ipv6.disable=1' ||
+         grep -q 'ipv6.disable=1' /boot/grub2/grub.cfg 2>/dev/null; then
+        pass "kernel command line contains ipv6.disable=1"
+      else
+        fail "kernel command line does not contain ipv6.disable=1"
+      fi
+    fi
   fi
 else
-  if is_container; then
-    skip "kernel command line cannot be changed inside $container_type"
+  if [ ! -e /etc/sysctl.d/99-disable-ipv6.conf ] && [ ! -e /etc/default/grub.d/99-disable-ipv6.cfg ]; then
+    pass "IPv6 stays enabled: no IPv6-disable configuration is present"
   else
-    if grubby --info=ALL 2>/dev/null | grep -q 'ipv6.disable=1' ||
-       grep -q 'ipv6.disable=1' /boot/grub2/grub.cfg 2>/dev/null; then
-      pass "kernel command line contains ipv6.disable=1"
-    else
-      fail "kernel command line does not contain ipv6.disable=1"
-    fi
+    fail "IPv6 should stay enabled but IPv6-disable configuration is present"
   fi
 fi
 
@@ -388,7 +485,7 @@ else
 fi
 
 if [ -f "$DOCKER_DAEMON_CONFIG" ]; then
-  if python3 - "$DOCKER_DAEMON_CONFIG" <<'PY' >/dev/null 2>&1
+  if python3 - "$DOCKER_DAEMON_CONFIG" "$DOCKER_DEFAULT_BIND_IP" <<'PY' >/dev/null 2>&1
 import json
 import sys
 
@@ -398,9 +495,11 @@ opts = config.get("log-opts", {})
 assert opts.get("max-size")
 assert opts.get("max-file")
 assert config.get("live-restore") is True
+if sys.argv[2]:
+    assert config.get("ip") == sys.argv[2]
 PY
   then
-    pass "Docker log rotation and live-restore are configured"
+    pass "Docker log rotation, live-restore and bind address are configured"
   else
     fail "Docker daemon configuration is incomplete: $DOCKER_DAEMON_CONFIG"
   fi
@@ -408,7 +507,7 @@ else
   fail "Docker daemon configuration is missing: $DOCKER_DAEMON_CONFIG"
 fi
 
-if [ "$DOCKER_ADD_ADMIN_TO_GROUP" = "True" ] || [ "$DOCKER_ADD_ADMIN_TO_GROUP" = "true" ]; then
+if json_true docker_add_admin_to_group; then
   if [ "$ADMIN_USER" = "root" ] || id -nG "$ADMIN_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     pass "$ADMIN_USER can access the Docker socket group"
   else
@@ -427,14 +526,23 @@ fi
 
 if [ "$ADMIN_USER" = "root" ]; then
   pass "admin user is root (full privileges)"
-elif su - "$ADMIN_USER" -c 'sudo -n true' >/dev/null 2>&1; then
-  pass "$ADMIN_USER can use sudo without a password"
+elif json_true admin_user_sudo_nopasswd; then
+  if su - "$ADMIN_USER" -c 'sudo -n true' >/dev/null 2>&1; then
+    pass "$ADMIN_USER can use sudo without a password"
+  else
+    fail "$ADMIN_USER cannot use sudo without a password"
+  fi
+elif [ ! -e "/etc/sudoers.d/90-$ADMIN_USER" ]; then
+  pass "passwordless sudo is not configured for $ADMIN_USER (sudo asks for the password)"
 else
-  fail "$ADMIN_USER cannot use sudo without a password"
+  fail "/etc/sudoers.d/90-$ADMIN_USER exists although admin_user_sudo_nopasswd is false"
 fi
 
 section "Listening ports"
-ALLOWED_PORTS="22 $FIREWALL_ALLOWED_PORTS"
+ALLOWED_PORTS="22"
+for spec in $FIREWALL_ALLOWED_PORTS; do
+  ALLOWED_PORTS="$ALLOWED_PORTS ${spec%%/*}"
+done
 unexpected=""
 while read -r state _recvq _sendq local _peer _rest; do
   [ "$state" = "LISTEN" ] || continue

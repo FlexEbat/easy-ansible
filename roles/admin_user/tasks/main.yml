@@ -4,6 +4,18 @@
     name: "{{ sudo_group }}"
     state: present
 
+- name: Check whether the admin user already exists
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ admin_user }}"
+    fail_key: false
+
+- name: Remember whether the admin user has to be created
+  ansible.builtin.set_fact:
+    admin_user_created: "{{ admin_user != 'root' and getent_passwd[admin_user] is none }}"
+
+# update_password: on_create keeps the password of an existing account and only
+# sets the hash for a user this playbook creates.
 - name: Ensure admin user exists
   ansible.builtin.user:
     name: "{{ admin_user }}"
@@ -12,6 +24,8 @@
     shell: /bin/bash
     groups: "{{ admin_user_groups }}"
     append: true
+    password: "{{ admin_user_password_hash | default(omit, true) }}"
+    update_password: on_create
   when: admin_user != 'root'
 
 - name: Look up admin user
@@ -33,12 +47,32 @@
     mode: "0700"
   when: admin_user != 'root'
 
+- name: Install SSH public keys for the admin user
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ admin_user_authorized_keys }}"
+  when: admin_user_authorized_keys | length > 0
+
+- name: Warn that a newly created admin user cannot log in
+  ansible.builtin.debug:
+    msg: >-
+      {{ admin_user }} was created without a password and without SSH keys, so
+      the account is locked and cannot log in. Set admin_user_password_hash
+      and/or admin_user_authorized_keys and run the playbook again.
+  when:
+    - admin_user_created | bool
+    - admin_user_password_hash | length == 0
+    - admin_user_authorized_keys | length == 0
+
 - name: Read admin user group membership
   ansible.builtin.command:
     cmd: "id -nG {{ admin_user }}"
   register: admin_group_check
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Assert admin user has sudo access
   ansible.builtin.assert:

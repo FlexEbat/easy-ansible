@@ -5,14 +5,18 @@ Ansible-плейбук приводит чистый сервер (или LXC/Do
 1. Определяет ОС и обновляет все пакеты (`apt dist-upgrade` или `dnf upgrade`).
 2. Устанавливает `sudo`, `curl`/`curl-minimal`, `wget`, `mtr`, `trippy`, `git`,
    `zram`, `CrowdSec`, официальный `Docker CE` и автообновления.
-3. Настраивает firewall, CrowdSec (+ firewall bouncer), BBR, отключение IPv6,
-   сетевые sysctl и zram.
+3. Настраивает firewall, CrowdSec (+ firewall bouncer), BBR, отключение IPv6
+   (можно выключить), сетевые sysctl, zram, синхронизацию времени (`chrony`)
+   и лимит журнала `journald`.
 4. Проверяет, что `admin_user` есть в группе администраторов; если нет —
-   создаёт пользователя и настраивает sudo.
+   создаёт пользователя (с паролем и/или SSH-ключами, если они заданы) и
+   настраивает sudo.
 5. Сообщает, требуется ли перезагрузка после обновления.
 
-SSH плейбук **не трогает**: `sshd` остаётся с конфигурацией дистрибутива —
-порт 22 и вход по логину и паролю. Firewall открывает `22/tcp` явно.
+По умолчанию SSH плейбук **не трогает**: `sshd` остаётся с конфигурацией
+дистрибутива — порт 22 и вход по логину и паролю. Firewall открывает `22/tcp`
+явно (в UFW с ограничением частоты подключений). Жёсткая настройка `sshd`
+включается отдельной опцией `ssh_harden` (см. раздел «SSH»).
 
 ## Поддерживаемые ОС
 
@@ -39,10 +43,11 @@ Debian 12 и Ubuntu 22.04 больше не поддерживаются: для
 ├── .ansible-lint
 ├── .yamllint
 ├── .github/workflows/ci.yml
-├── molecule/default/          # Molecule-сценарий (Debian 13, Ubuntu 24.04, Rocky 9)
-└── roles/
-    ├── base/          # обновление, пакеты, автообновления, trippy
-    ├── admin_user/    # admin_user, группа sudo/wheel, sudoers
+├── molecule/default/          # Molecule (Debian 13, Ubuntu 24.04, Rocky 9; Rocky 8 — best effort)
+└── roles/                     # у каждой роли свои defaults/main.yml
+    ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
+    ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
+    ├── ssh/           # опциональная настройка sshd (ssh_harden, по умолчанию выключена)
     ├── firewall/      # UFW или firewalld (SSH на порту 22 разрешён)
     ├── crowdsec/      # сервис, LAPI, collections, bouncer, whitelist
     ├── kernel/        # BBR, IPv6, sysctl hardening, zram
@@ -86,6 +91,10 @@ ansible-playbook -i inventory.ini site.yml -e admin_user=admin
 подключается к хосту), а не `$USER` на control node. Это важно при запуске с
 ноутбука: без `-e admin_user=...` будет выбран именно удалённый пользователь.
 
+Беспарольный sudo по умолчанию **выключен**. Если при удалённом запуске Ansible
+подключается пользователем, который полагался на `NOPASSWD`, передайте пароль
+(`-K`) или включите `-e admin_user_sudo_nopasswd=true`.
+
 ## Итоги запуска
 
 После запуска на сервере есть файл `/etc/ansible-setup-summary.json`:
@@ -99,36 +108,53 @@ ansible-playbook -i inventory.ini site.yml -e admin_user=admin
   "distribution": "Debian",
   "distribution_version": "13.7",
   "docker_add_admin_to_group": true,
-  "firewall_allowed_ports": [],
+  "firewall_allowed_ports": ["80/tcp", "443/tcp"],
   "firewall_backend": "ufw",
   "os_family": "Debian",
   "reboot_required": false,
+  "ssh_harden": false,
   "sudo_group": "sudo"
 }
 ```
 
-Плейбук также печатает эти значения в задаче `Show setup summary`. SSH-состояние
-(порт, ключи) плейбук не меняет и в summary не пишет.
+(показана часть полей). Порты записываются как `порт/протокол`. Плейбук также
+печатает основные значения в задаче `Show setup summary`. `verify.sh`
+сверяет систему именно с этим файлом.
 
 ## Переменные
 
-Основные переменные лежат в `group_vars/all.yml`.
+Общие переменные (`admin_user*`, `firewall_allowed_ports`, определение ОС)
+лежат в `group_vars/all.yml`. Всё, что относится к одной роли, — в
+`roles/<роль>/defaults/main.yml`; любую переменную можно переопределить в
+`group_vars`, inventory или через `-e`.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `admin_user` | `ansible_user` | пользователь, которого проверяем/добавляем в sudo/wheel |
-| `admin_user_sudo_nopasswd` | `true` | беспарольный sudo для key-only пользователя |
-| `firewall_allowed_ports` | `[]` | дополнительные порты (например, 80/443) |
+| `admin_user_password_hash` | `""` | хэш пароля для **нового** пользователя (`mkpasswd --method=sha-512`); пароль существующего не меняется |
+| `admin_user_authorized_keys` | `[]` | публичные SSH-ключи пользователя |
+| `admin_user_sudo_nopasswd` | `false` | беспарольный sudo (включайте только для key-only аккаунта) |
+| `ssh_harden` | `false` | включить drop-in `00-ansible-hardening.conf` для sshd |
+| `ssh_password_auth` | `true` | вход по паролю (при `ssh_harden`); `false` = только ключи |
+| `ssh_permit_root_login` | `prohibit-password` | `no` / `prohibit-password` / `yes` |
+| `firewall_allowed_ports` | `[]` | дополнительные порты (`port`, `proto`, `from`) |
+| `firewall_ssh_rate_limit` | `true` | UFW: `limit` вместо `allow` для 22/tcp |
 | `auto_updates_enabled` | `true` | unattended-upgrades / dnf-automatic |
-| `zram_percent` | `25` | сколько RAM отдать под zram |
-| `zram_algorithm` | `zstd` | алгоритм сжатия zram |
-| `zram_priority` | `100` | приоритет swap для zram |
+| `auto_reboot` / `auto_reboot_time` | `false` / `04:00` | автоперезагрузка после обновлений (время — только Debian/Ubuntu) |
+| `base_time_sync` | `true` | установить и включить `chrony` (не в контейнерах) |
+| `base_journald_max_use` | `500M` | `SystemMaxUse` для journald; пустая строка — не трогать |
+| `base_install_trippy` | `true` | ставить `trippy` (`false` — только `mtr`) |
+| `disable_ipv6` | `true` | отключить IPv6; `false` убирает конфиги (эффект после перезагрузки) |
+| `kernel_rp_filter` | `2` | `rp_filter`: 2 loose (безопасно с VPN/Docker), 1 strict, 0 off |
+| `kernel_log_martians` | `0` | логировать martian-пакеты |
+| `zram_percent` / `zram_algorithm` / `zram_priority` | `25` / `zstd` / `100` | параметры zram |
 | `crowdsec_whitelist_ips` | `[]` | IP, которые CrowdSec никогда не заблокирует |
-| `crowdsec_whitelist_cidrs` | `["192.168.1.0/24"]` | подсети-исключения CrowdSec (по умолчанию management-LAN этого хоста, чтобы опечатки в пароле не привели к бану) |
+| `crowdsec_whitelist_cidrs` | `[]` | подсети-исключения (в `inventory.ini` для лаборатории задан `192.168.1.0/24`) |
 | `docker_service_enabled` | `true` | включает/выключает Docker |
 | `docker_add_admin_to_group` | `true` | добавить `admin_user` в группу `docker` |
-| `docker_log_max_size` | `10m` | ротация логов Docker |
-| `docker_log_max_file` | `3` | число файлов ротации |
+| `docker_default_bind_ip` | `""` | адрес по умолчанию для опубликованных портов; `127.0.0.1` закрывает их от интернета |
+| `docker_no_new_privileges` | `false` | `no-new-privileges` по умолчанию для всех контейнеров |
+| `docker_log_max_size` / `docker_log_max_file` | `10m` / `3` | ротация логов Docker |
 | `docker_live_restore` | `true` | не останавливать контейнеры при рестарте daemon |
 
 Пример дополнительных портов:
@@ -150,20 +176,40 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - Debian/Ubuntu: настраивается `unattended-upgrades`; RHEL: `dnf-automatic`
   (`upgrade_type = default`, `apply_updates` управляется
   `auto_updates_enabled`).
-- `trippy` ставится из репозитория дистрибутива, если доступен; иначе
-  загружается upstream-артефакт с проверкой SHA-256 (`.deb` для amd64/RPM для
-  x86_64, tarball для остальных архитектур).
+- `trippy` (`roles/base/tasks/trippy.yml`, общий для обоих семейств) ставится
+  из репозитория дистрибутива, если доступен; иначе загружается upstream-артефакт
+  с проверкой SHA-256 (`.deb`/RPM для x86_64, tarball для aarch64). На других
+  архитектурах пропускается. Отключается `base_install_trippy=false`.
+- `chrony` (синхронизация времени; не в контейнерах) и лимит `journald`
+  (`/etc/systemd/journald.conf.d/99-ansible.conf`).
+- `auto_reboot=true` включает автоперезагрузку после обновлений
+  (`Automatic-Reboot` в unattended-upgrades; `reboot = when-needed` в
+  dnf-automatic — на старых dnf-automatic опция игнорируется).
 - В конце проверяется `/var/run/reboot-required` (Debian/Ubuntu) или
   `needs-restarting -r` (RHEL), результат попадает в summary и выводится
   предупреждение.
 
 ### SSH
 
-Плейбук не изменяет конфигурацию `sshd` — она остаётся такой, как в
-дистрибутиве: порт 22, вход по логину и паролю включён. Роль `base` только
-гарантирует, что `openssh-server` установлен и сервис запущен, а firewall
-открывает `22/tcp`. Существующие файлы в `/etc/ssh/sshd_config.d/` не
-изменяются и не удаляются.
+По умолчанию плейбук не изменяет конфигурацию `sshd`: порт 22, вход по логину и
+паролю включён. Роль `base` гарантирует, что `openssh-server` установлен, а
+firewall открывает `22/tcp` (UFW — с `limit`: не более 6 новых подключений за
+30 секунд с одного адреса).
+
+Опционально (`-e ssh_harden=true`) роль `ssh` пишет drop-in
+`/etc/ssh/sshd_config.d/00-ansible-hardening.conf` (читается первым, поэтому
+перекрывает, например, файлы cloud-init): `PermitRootLogin`, `PubkeyAuthentication`,
+`PasswordAuthentication`, `MaxAuthTries`, `X11Forwarding`. Порт SSH не меняется.
+Конфигурация проверяется `sshd -t`, применяется через `reload`
+(текущие сессии не разрываются). Для отключения паролей:
+
+```bash
+ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
+  -e '{"admin_user_authorized_keys": ["ssh-ed25519 AAAA... me@laptop"]}'
+```
+
+Плейбук откажется отключать пароли, если у `admin_user` нет непустого
+`authorized_keys` (защита от потери доступа). `ssh_harden=false` удаляет drop-in.
 
 ### Firewall
 
@@ -186,7 +232,8 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - Доустанавливаются коллекции `crowdsecurity/linux` и `crowdsecurity/sshd`,
   парсер `crowdsecurity/whitelists`.
 - Whitelist включает loopback, собственный IP хоста и всё из
-  `crowdsec_whitelist_ips` / `crowdsec_whitelist_cidrs`.
+  `crowdsec_whitelist_ips` / `crowdsec_whitelist_cidrs`. Сеть хоста целиком
+  **не** добавляется: на VPS это подсеть провайдера.
 - На Debian 13 ставится и включается `rsyslog`, иначе CrowdSec не видит
   `/var/log/auth.log`.
 - Bouncer регистрируется автоматически пакетом; если пакет оставил
@@ -198,18 +245,28 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 
 ### BBR, IPv6 и sysctl hardening
 
+- Файлы `/etc/sysctl.d/*.conf` ведутся модулем `ansible.posix.sysctl`
+  (формат `ключ=значение`); значения применяет handler `sysctl -p`, только при
+  изменении файла и не внутри контейнеров.
 - BBR: `/etc/sysctl.d/99-bbr.conf` с `fq` и `bbr`; на реальном хосте
-  загружаются модули и применяется `sysctl -p`.
-- IPv6: `/etc/sysctl.d/99-disable-ipv6.conf`, GRUB drop-in
-  `/etc/default/grub.d/99-disable-ipv6.cfg` и `ipv6.disable=1` (Debian/Ubuntu —
-  `update-grub`, RHEL — `grubby`).
-- Сетевые sysctl (`/etc/sysctl.d/99-hardening.conf`): `rp_filter`,
-  SYN cookies, защита от source routing и ICMP redirects, логирование martian
-  пакетов. `net.ipv4.ip_forward` намеренно **не** отключается — он нужен
-  Docker.
-- В контейнерах (`lxc`, `docker`, `podman`, `containerd`, `systemd-nspawn`)
-  запись конфигов выполняется, но применение kernel-настроек пропускается:
-  ядром управляет хост.
+  загружаются модули `tcp_bbr` и `sch_fq`.
+- IPv6 (`disable_ipv6`, по умолчанию `true`): `/etc/sysctl.d/99-disable-ipv6.conf`
+  и `ipv6.disable=1` в командной строке ядра (Debian/Ubuntu — drop-in
+  `/etc/default/grub.d/99-disable-ipv6.cfg` + `update-grub`, RHEL — `grubby`;
+  без `grubby` параметр дописывается к существующему `GRUB_CMDLINE_LINUX`).
+  При `false` файлы и параметр удаляются.
+- Сетевые sysctl (`/etc/sysctl.d/99-hardening.conf`): `rp_filter`
+  (по умолчанию loose, `kernel_rp_filter`), SYN cookies, защита от source
+  routing и ICMP redirects, `icmp_echo_ignore_broadcasts`,
+  `kernel.dmesg_restrict`, `fs.suid_dumpable`. `log_martians` по умолчанию
+  выключен. `tcp_syn_retries` больше не задаётся (он влияет только на
+  исходящие соединения; из старых конфигов удаляется).
+  `net.ipv4.ip_forward` намеренно **не** отключается — он нужен Docker.
+- Контейнером считается только гость (`virtualization_role == guest` и тип
+  `lxc`/`docker`/`podman`/`containerd`/`systemd-nspawn`): на голом сервере с
+  Docker kernel-настройки применяются. В контейнерах конфиги пишутся, но
+  применение пропускается — ядром управляет хост (IPv6 применяется, это
+  параметр сетевого namespace).
 
 ### zram
 
@@ -229,8 +286,9 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - Удаляются конфликтующие пакеты дистрибутива (`docker.io`, `podman`, `runc`
   и т. п.), ставятся `docker-ce`, `docker-ce-cli`, `containerd.io`,
   `docker-buildx-plugin`, `docker-compose-plugin`.
-- `/etc/docker/daemon.json`: ротация логов (`max-size`, `max-file`) и
-  `live-restore`.
+- `/etc/docker/daemon.json`: ротация логов (`max-size`, `max-file`),
+  `live-restore`; опционально `"ip"` (`docker_default_bind_ip`) и
+  `"no-new-privileges"` (`docker_no_new_privileges`).
 - `admin_user` добавляется в группу `docker` при
   `docker_add_admin_to_group=true` (нужен новый логин).
 
@@ -238,9 +296,12 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 
 - Debian/Ubuntu проверяется членство в группе `sudo`, RHEL — в `wheel`.
 - Если пользователя нет, он создаётся с домашней директорией и `/bin/bash`.
+  Без `admin_user_password_hash` и `admin_user_authorized_keys` такая учётка
+  заблокирована — плейбук выводит предупреждение. Ключи ставятся через
+  `authorized_key`, хэш пароля применяется только при создании.
 - При `admin_user_sudo_nopasswd=true` создаётся
   `/etc/sudoers.d/90-<user>` с `NOPASSWD:ALL`; файл проверяется
-  `visudo -cf`.
+  `visudo -cf`. При `false` (по умолчанию) этот файл удаляется.
 - Для `admin_user=root` членство в группе не требуется.
 
 ## Проверка
@@ -248,9 +309,12 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 `verify.sh` определяет ОС и проверяет:
 
 - установленные пакеты (apt/rpm; `curl-minimal` засчитывается как `curl`);
-- SSH: `sshd` слушает порт 22 и разрешает вход по паролю;
-- firewall: UFW или firewalld (active, порт 22 разрешён,
-  `firewall_allowed_ports` открыты);
+- SSH: `sshd` слушает порт 22; при `ssh_harden=true` проверяются
+  `PasswordAuthentication` и `PermitRootLogin` из настроек плейбука (вход по
+  паролю сам по себе не требуется и не запрещается);
+- firewall: UFW или firewalld (active, порт 22 разрешён — `LIMIT` при
+  `firewall_ssh_rate_limit`, `firewall_allowed_ports` вместе с протоколом);
+- `chrony`, лимит `journald`;
 - active `crowdsec` и `crowdsec-firewall-bouncer`, LAPI, метрики, коллекцию
   `sshd`, парсер whitelists, зарегистрированный bouncer и его режим;
 - `rsyslog` и `/var/log/auth.log` на Debian/Ubuntu;
@@ -258,13 +322,14 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - конфиг BBR, IPv6 и sysctl hardening (runtime-значения — на не-контейнере);
 - конфиг zram и активный сервис (на не-контейнере);
 - Docker CE service, ответ daemon, `daemon.json` и доступ к сокету;
-- членство в sudo/wheel и работу `sudo -n`;
+- членство в sudo/wheel; `sudo -n` — только при `admin_user_sudo_nopasswd=true`
+  (иначе проверяется, что файл sudoers не создан);
 - отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт 22,
   loopback и `firewall_allowed_ports`;
 - необходимость перезагрузки.
 
-Запуск (нужны root-права — скрипт читает `sshd -T`, `ufw status` и файлы
-только root):
+Запуск (нужны root-права — скрипт читает `sshd -T`, `ufw status` и файлы,
+доступные только root):
 
 ```bash
 sudo ./verify.sh
@@ -274,7 +339,7 @@ sudo ./verify.sh
 
 ## Тесты и линтеры
 
-Molecule-сценарий поднимает три контейнера и для каждого прогоняет
+Molecule-сценарий поднимает контейнеры (Debian 13, Ubuntu 24.04, Rocky 9 и экспериментально Rocky 8) и для каждого прогоняет
 `converge → idempotence → verify`. Повторный прогон обязан дать `changed=0`.
 
 ```bash
@@ -289,6 +354,9 @@ ansible-lint
 molecule test -p debian13
 molecule test -p ubuntu2404
 molecule test -p rockylinux9
+molecule test -p rockylinux8   # best effort
+
+shellcheck verify.sh run.sh
 ```
 
 Платформы: `geerlingguy/docker-debian13-ansible`,
@@ -299,21 +367,26 @@ RHEL-семейством). Для systemd контейнеры запускаю
 `cgroupns_mode: host` и монтированием `/sys/fs/cgroup`.
 
 GitHub Actions (`.github/workflows/ci.yml`) запускает `yamllint`,
-`ansible-lint` и матрицу Molecule для всех трёх платформ.
+`ansible-lint`, `shellcheck` и матрицу Molecule. Rocky 8 в CI помечен как
+`continue-on-error`: RHEL 8 заявлен как поддерживаемый, но не гарантирован
+автотестами (системный Python 3.6 слишком стар для свежих `ansible-core`).
 
 ## Безопасность и ограничения
 
-- SSH намеренно оставлен в конфигурации дистрибутива: порт 22, вход по логину
-  и паролю включён. Это осознанный компромисс для удобства доступа; для
-  продакшена настройте ключи и отключение паролей самостоятельно.
-- CrowdSec не банит адреса из `crowdsec_whitelist_cidrs`; по умолчанию в
-  списке management-LAN хоста, чтобы опечатки в пароле не привели к блокировке
-  вашего IP.
+- SSH по умолчанию остаётся в конфигурации дистрибутива: порт 22, вход по
+  паролю включён (UFW ограничивает частоту подключений, CrowdSec банит
+  перебор). Для продакшена включите `ssh_harden` с `ssh_password_auth=false`
+  и ключами.
+- CrowdSec не банит loopback, собственный IP хоста и адреса из
+  `crowdsec_whitelist_ips` / `crowdsec_whitelist_cidrs`. Добавьте сюда свои
+  management-адреса, чтобы опечатки в пароле не привели к блокировке.
 - Docker публикует порты через свои iptables/nftables-правила в обход
-  UFW/firewalld. Если контейнеры публикуют порты, ограничивайте их отдельно
-  (bind на `127.0.0.1` или правила Docker/host).
-- `NOPASSWD` для администратора удобен для key-only сервера, но это осознанный
-  компромисс. Отключается через `-e admin_user_sudo_nopasswd=false`.
+  UFW/firewalld. Чтобы опубликованные порты не были видны из интернета по
+  умолчанию, задайте `docker_default_bind_ip: 127.0.0.1` и открывайте нужное
+  явно (`"0.0.0.0:443:443"` в compose); иначе ограничивайте их правилами
+  `DOCKER-USER`.
+- `NOPASSWD` выключен по умолчанию; включайте только для аккаунта, который
+  входит по ключу.
 - `live-restore` сохраняет контейнеры при перезапуске Docker daemon, но не
   заменяет собой мониторинг и обновление контейнеров.
 - Плейбук не управляет SELinux-политиками приложений и не открывает порты

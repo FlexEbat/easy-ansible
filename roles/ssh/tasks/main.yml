@@ -1,0 +1,75 @@
+---
+- name: Remove the hardening drop-in when SSH hardening is disabled
+  ansible.builtin.file:
+    path: "{{ ssh_dropin_file }}"
+    state: absent
+  when: not (ssh_harden | bool)
+  notify: Reload ssh
+
+- name: Harden sshd
+  when: ssh_harden | bool
+  block:
+    - name: Look for SSH keys of the admin user
+      ansible.builtin.stat:
+        path: "{{ admin_home }}/.ssh/authorized_keys"
+      register: ssh_admin_keys
+
+    - name: Assert that the configuration cannot lock everybody out
+      ansible.builtin.assert:
+        that:
+          - >-
+            ssh_password_auth | bool
+            or (ssh_admin_keys.stat.exists and ssh_admin_keys.stat.size > 0)
+          - admin_user != 'root' or ssh_permit_root_login != 'no'
+        fail_msg: >-
+          Refusing to apply the SSH hardening: password login would be
+          disabled while {{ admin_user }} has no SSH key in
+          {{ admin_home }}/.ssh/authorized_keys (or root login is disabled
+          while root is the admin user). Set admin_user_authorized_keys first.
+
+    - name: Ensure the sshd drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Debian ships this Include by default; older RHEL releases may not. It is
+    # added once, at the top, so the drop-in is always read.
+    - name: Ensure sshd_config includes the drop-in directory
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "Include /etc/ssh/sshd_config.d/*.conf"
+        regexp: '^Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$'
+        insertbefore: BOF
+        state: present
+      notify: Reload ssh
+
+    # "sshd -t" needs the privilege separation directory on Debian.
+    - name: Ensure /run/sshd exists
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write the sshd hardening drop-in
+      ansible.builtin.copy:
+        dest: "{{ ssh_dropin_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: "/usr/sbin/sshd -t -f %s"
+        content: |
+          # Managed by Ansible
+          PermitRootLogin {{ ssh_permit_root_login }}
+          PubkeyAuthentication yes
+          PasswordAuthentication {{ 'yes' if ssh_password_auth | bool else 'no' }}
+          {% if not (ssh_password_auth | bool) %}
+          {{ ssh_kbd_interactive_option }} no
+          {% endif %}
+          MaxAuthTries {{ ssh_max_auth_tries }}
+          X11Forwarding {{ 'yes' if ssh_x11_forwarding | bool else 'no' }}
+      notify: Reload ssh

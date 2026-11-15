@@ -1,0 +1,31 @@
+---
+# Debian 13 and Ubuntu 24.04 ship CrowdSec in the distribution repositories.
+# The RHEL family does not, so the official CrowdSec packagecloud repository
+# is used there.
+crowdsec_packages_debian:
+  - crowdsec
+  - crowdsec-firewall-bouncer
+  # The bouncer runs in iptables mode on UFW hosts and needs ipset. The Debian
+  # package depends on "nftables | ipset"; Ubuntu satisfies it with nftables,
+  # so install ipset explicitly.
+  - ipset
+# packagecloud publishes the bouncer split by backend; the RHEL family uses
+# the nftables variant (firewalld is nftables-based).
+crowdsec_packages_rhel:
+  - crowdsec
+  - crowdsec-firewall-bouncer-nftables
+crowdsec_rhel_repo_file: /etc/yum.repos.d/crowdsec_crowdsec.repo
+crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/$releasever/$basearch"
+crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+# UFW uses the iptables backend; firewalld is nftables-based.
+crowdsec_bouncer_mode: "{{ 'nftables' if firewall_backend == 'firewalld' else 'iptables' }}"
+crowdsec_collections_required:
+  - crowdsecurity/linux
+  - crowdsecurity/sshd
+crowdsec_whitelist_path: /etc/crowdsec/parsers/s02-enrich/ansible-whitelist.yaml
+# Addresses that must never be banned. Loopback and the host's own address are
+# added automatically. The host's network is NOT whitelisted: on a VPS it is the
+# provider's subnet, which would exempt strangers. Add your management IPs or
+# VPN/LAN networks here (or per host/group in the inventory).
+crowdsec_whitelist_ips: []
+crowdsec_whitelist_cidrs: []

@@ -33,14 +33,23 @@
         fail_msg: >-
           admin_user resolved to an empty value. Pass -e admin_user=<name>.
 
-    - name: Assert that extra firewall ports have a port number
+    - name: Assert that extra firewall ports have a port number and a valid protocol
       ansible.builtin.assert:
         that:
           - item.port is defined
+          - (item.proto | default('tcp')) in ['tcp', 'udp']
         fail_msg: >-
-          firewall_allowed_ports entries must be mappings with a "port" key;
-          got {{ item | to_json }}.
+          firewall_allowed_ports entries must be mappings with a "port" key and
+          an optional "proto" of tcp or udp; got {{ item | to_json }}.
       loop: "{{ firewall_allowed_ports }}"
+
+    # "80/tcp", "443/udp", ...: used by the summary and by verify.sh.
+    - name: Normalise the extra firewall ports
+      ansible.builtin.set_fact:
+        firewall_allowed_specs: >-
+          {{ firewall_allowed_ports | map(attribute='port')
+             | zip(firewall_allowed_ports | map(attribute='proto', default='tcp'))
+             | map('join', '/') | list }}
 
     - name: Initialize the reboot-required flag
       ansible.builtin.set_fact:
@@ -49,6 +58,7 @@
   roles:
     - base
     - admin_user
+    - ssh
     - firewall
     - crowdsec
     - kernel
@@ -74,13 +84,27 @@
             'admin_user': admin_user,
             'admin_home': admin_home,
             'sudo_group': sudo_group,
+            'admin_user_sudo_nopasswd': admin_user_sudo_nopasswd | bool,
+            'ssh_harden': ssh_harden | bool,
+            'ssh_password_auth': ssh_password_auth | bool,
+            'ssh_permit_root_login': ssh_permit_root_login,
             'firewall_backend': firewall_backend,
-            'firewall_allowed_ports': firewall_allowed_ports | map(attribute='port') | map('int') | list,
+            'firewall_allowed_ports': firewall_allowed_specs,
+            'firewall_ssh_rate_limit': firewall_ssh_rate_limit | bool,
             'crowdsec_bouncer_mode': crowdsec_bouncer_mode,
             'crowdsec_bouncer_config': crowdsec_bouncer_config,
             'auto_updates_enabled': auto_updates_enabled | bool,
+            'auto_reboot': auto_reboot | bool,
+            'base_time_sync': base_time_sync | bool,
+            'base_install_trippy': base_install_trippy | bool,
+            'base_journald_max_use': base_journald_max_use,
+            'is_container': is_container | bool,
+            'disable_ipv6': disable_ipv6 | bool,
+            'kernel_rp_filter': kernel_rp_filter | int,
+            'kernel_log_martians': kernel_log_martians | int,
             'docker_daemon_config': docker_daemon_config,
             'docker_add_admin_to_group': docker_add_admin_to_group | bool,
+            'docker_default_bind_ip': docker_default_bind_ip,
             'reboot_required': reboot_required | bool
           } | to_nice_json }}
 
@@ -88,10 +112,12 @@
       ansible.builtin.debug:
         msg:
           - "OS:               {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
-          - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }})"
+          - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }}, NOPASSWD: {{ admin_user_sudo_nopasswd }})"
+          - "SSH hardening:    {{ ssh_harden }} (password login: {{ ssh_password_auth }})"
           - "Firewall:         {{ firewall_backend }}"
-          - "Extra open ports: {{ firewall_allowed_ports | map(attribute='port') | list | join(', ') if firewall_allowed_ports | length > 0 else 'none' }}"
-          - "Auto updates:     {{ auto_updates_enabled }}"
+          - "Extra open ports: {{ firewall_allowed_specs | join(', ') if firewall_allowed_specs | length > 0 else 'none' }}"
+          - "Auto updates:     {{ auto_updates_enabled }} (auto reboot: {{ auto_reboot }})"
+          - "IPv6 disabled:    {{ disable_ipv6 }}"
           - "Reboot required:  {{ reboot_required }}"
           - "Summary file:     /etc/ansible-setup-summary.json"
 

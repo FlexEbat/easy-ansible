@@ -1,4 +1,8 @@
 ---
+# Cross-cutting variables only. Everything that belongs to a single role lives
+# in roles/<role>/defaults/main.yml and can be overridden from here, from the
+# inventory or with -e.
+
 # ---------------------------------------------------------------------------
 # Operating system helpers (Debian/Ubuntu and RHEL family)
 # ---------------------------------------------------------------------------
@@ -6,73 +10,15 @@ is_debian: "{{ ansible_facts['os_family'] == 'Debian' }}"
 is_rhel: "{{ ansible_facts['os_family'] == 'RedHat' }}"
 sudo_group: "{{ 'wheel' if ansible_facts['os_family'] == 'RedHat' else 'sudo' }}"
 firewall_backend: "{{ 'firewalld' if ansible_facts['os_family'] == 'RedHat' else 'ufw' }}"
-docker_repo_distro: "{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu' else 'debian' }}"
-# Docker publishes a separate repository for RHEL derivatives. AlmaLinux,
-# Rocky and CentOS Stream use the CentOS repository; RHEL itself uses rhel.
-docker_rhel_repo_flavor: >-
-  {{ 'centos' if ansible_facts['distribution'] in
-     ['AlmaLinux', 'Rocky', 'CentOS', 'CentOS Stream']
-     else 'rhel' }}
 
-# ---------------------------------------------------------------------------
-# Packages
-# ---------------------------------------------------------------------------
-# Docker and CrowdSec are installed by their own roles because they may need a
-# third-party repository (Docker CE on all supported distributions, CrowdSec
-# on the RHEL family).
-base_packages_common:
-  - sudo
-  - wget
-  - git
-  - ca-certificates
-  - kmod
-  - openssh-server
-
-base_packages_debian:
-  - curl
-  - openssh-client
-  - procps
-  - ufw
-  - mtr
-  - zram-tools
-  - unattended-upgrades
-  - rsyslog
-
-# trippy is not in the RHEL/EPEL repositories and is installed by the base
-# role from an upstream release instead. Debian 13 ships it; Ubuntu and older
-# Debian releases get the upstream build.
-base_packages_rhel:
-  - openssh-clients
-  - procps-ng
-  - firewalld
-  - python3-firewall
-  - policycoreutils-python-utils
-  - dnf-plugins-core
-  - mtr
-  - zram-generator
-  - dnf-automatic
-  # Provides needs-restarting, used for reboot reporting.
-  - yum-utils
-
-trippy_version: "0.13.0"
-trippy_rpm_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
-trippy_rpm_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-{{ trippy_rpm_arch }}.rpm"
-trippy_rpm_checksum: "sha256:7c845f29d7cc7cc588609949442673b8f4b37b7c0d8142d16305355a48b1b217"
-trippy_tarball_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
-trippy_tarball_url: >-
-  {{ ('https://github.com/fujiapple852/trippy/releases/download/'
-      ~ trippy_version ~ '/trippy-' ~ trippy_version ~ '-'
-      ~ trippy_tarball_arch ~ '-unknown-linux-gnu.tar.gz') }}
-trippy_tarball_checksum: >-
-  {{ 'sha256:c4245db59d3251df3c3045752d931afbed00b97896adeb93be62bf0bf3933f09'
-     if trippy_tarball_arch == 'x86_64'
-     else 'sha256:0afa3fc574066ff0d91d9e81ec0da012822c83bb39f691f52b562f9b6bbdaae3' }}
-trippy_extract_dir: "/tmp/trippy-{{ trippy_version }}"
-trippy_tarball_member: "trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu/trip"
-trippy_deb_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy_x86_64-unknown-linux-gnu_{{ trippy_version }}_amd64.deb"
-trippy_deb_checksum: "sha256:8fe6e4677399ab5b7b2e75925b913b922ffa3785875b04588a8eca8270349007"
-trippy_deb_path: "/tmp/trippy_{{ trippy_version }}_amd64.deb"
-trippy_tarball_path: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+# True only when the play runs INSIDE a container (guest). A bare host that
+# merely runs Docker can be reported as virtualization_type=docker with role
+# "host"; that must not be treated as a container, otherwise kernel settings
+# would be silently skipped on real servers.
+is_container: >-
+  {{ ansible_facts['virtualization_type'] | default('') in
+       ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+     and ansible_facts['virtualization_role'] | default('') == 'guest' }}
 
 # ---------------------------------------------------------------------------
 # Admin user / sudo
@@ -84,19 +30,23 @@ admin_user: "{{ ansible_user | default(ansible_user_id | default('root'), true) 
 # "sudo" on Debian/Ubuntu, "wheel" on the RHEL family.
 admin_user_groups:
   - "{{ sudo_group }}"
-# With a locked password (newly created users have one), plain sudo group
-# membership is not usable without a password. Enable NOPASSWD for the
-# generated key-only admin. Set to false if you manage sudoers separately.
-admin_user_sudo_nopasswd: true
+# A newly created user has a locked password and no SSH key, so it cannot log
+# in until one of these is set. Both are optional and only applied to users
+# other than root.
+#   admin_user_password_hash: generate with  mkpasswd --method=sha-512
+#   admin_user_authorized_keys: list of public key lines
+admin_user_password_hash: ""
+admin_user_authorized_keys: []
+# Passwordless sudo is OFF by default: with password SSH login enabled it would
+# turn a guessed/leaked login password into root without any second step.
+# Enable it only for key-only accounts. NOTE: on remote runs where the
+# connecting user relies on NOPASSWD, keep this true or pass -K.
+admin_user_sudo_nopasswd: false
 
 # ---------------------------------------------------------------------------
-# Firewall
+# Firewall: extra ports (used by pre_tasks, firewall role and the summary)
 # ---------------------------------------------------------------------------
-ufw_logging: low
-# Empty = use the firewalld default zone. Set explicitly to override.
-firewalld_zone: ""
-# Additional ports to open (for example services published by Docker).
-# Each entry is a mapping. "from" is optional and defaults to any source.
+# Each entry is a mapping. "proto" defaults to tcp, "from" to any source.
 # Example:
 # firewall_allowed_ports:
 #   - port: 80
@@ -105,100 +55,3 @@ firewalld_zone: ""
 #     proto: tcp
 #     from: 10.0.0.0/8
 firewall_allowed_ports: []
-
-# ---------------------------------------------------------------------------
-# Automatic security updates
-# ---------------------------------------------------------------------------
-# Debian/Ubuntu: unattended-upgrades. RHEL family: dnf-automatic.
-auto_updates_enabled: true
-apt_auto_upgrades_config: /etc/apt/apt.conf.d/20auto-upgrades
-dnf_automatic_config: /etc/dnf/automatic.conf
-dnf_automatic_timer: dnf-automatic.timer
-
-# ---------------------------------------------------------------------------
-# Kernel: BBR / IPv6 / hardening / zram
-# ---------------------------------------------------------------------------
-bbr_sysctl_file: /etc/sysctl.d/99-bbr.conf
-sysctl_hardening_file: /etc/sysctl.d/99-hardening.conf
-ipv6_sysctl_file: /etc/sysctl.d/99-disable-ipv6.conf
-ipv6_grub_dropin: /etc/default/grub.d/99-disable-ipv6.cfg
-
-zram_algorithm: zstd
-zram_percent: 25
-zram_priority: 100
-# RHEL family only: zram-generator configuration.
-zram_generator_config: /etc/systemd/zram-generator.conf
-zram_generator_service: systemd-zram-setup@zram0.service
-
-# ---------------------------------------------------------------------------
-# CrowdSec
-# ---------------------------------------------------------------------------
-# Debian 13 and Ubuntu 24.04 ship CrowdSec in the distribution repositories.
-# The RHEL family does not, so the official CrowdSec packagecloud repository
-# is used there.
-crowdsec_packages_debian:
-  - crowdsec
-  - crowdsec-firewall-bouncer
-  # The bouncer runs in iptables mode on UFW hosts and needs ipset. The Debian
-  # package depends on "nftables | ipset"; Ubuntu satisfies it with nftables,
-  # so install ipset explicitly.
-  - ipset
-# packagecloud publishes the bouncer split by backend; the RHEL family uses
-# the nftables variant (firewalld is nftables-based).
-crowdsec_packages_rhel:
-  - crowdsec
-  - crowdsec-firewall-bouncer-nftables
-crowdsec_rhel_repo_file: /etc/yum.repos.d/crowdsec_crowdsec.repo
-crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/$releasever/$basearch"
-crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
-# UFW uses the iptables backend; firewalld is nftables-based.
-crowdsec_bouncer_mode: "{{ 'nftables' if firewall_backend == 'firewalld' else 'iptables' }}"
-crowdsec_collections_required:
-  - crowdsecurity/linux
-  - crowdsecurity/sshd
-crowdsec_whitelist_path: /etc/crowdsec/parsers/s02-enrich/ansible-whitelist.yaml
-# Addresses that must never be banned. Loopback and the host's own address
-# are added automatically; add management IPs or VPN networks here.
-# The management LAN is whitelisted by default so that mistyped passwords
-# during password logins never lock you out.
-crowdsec_whitelist_ips: []
-crowdsec_whitelist_cidrs:
-  - 192.168.1.0/24
-
-# ---------------------------------------------------------------------------
-# Docker
-# ---------------------------------------------------------------------------
-docker_service_enabled: true
-docker_daemon_config: /etc/docker/daemon.json
-docker_log_max_size: 10m
-docker_log_max_file: "3"
-docker_live_restore: true
-# Add admin_user to the docker group (requires a new login to take effect).
-docker_add_admin_to_group: true
-# Packages from the distribution that conflict with Docker CE.
-docker_conflicting_packages_debian:
-  - docker.io
-  - docker-doc
-  - docker-compose
-  - docker-buildx
-  - docker-cli
-  - podman-docker
-  - containerd
-  - runc
-docker_conflicting_packages_rhel:
-  - docker
-  - docker-client
-  - docker-client-latest
-  - docker-common
-  - docker-latest
-  - docker-latest-logrotate
-  - docker-logrotate
-  - docker-engine
-  - podman
-  - runc
-docker_ce_packages:
-  - docker-ce
-  - docker-ce-cli
-  - containerd.io
-  - docker-buildx-plugin
-  - docker-compose-plugin

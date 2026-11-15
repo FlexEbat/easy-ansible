@@ -1,10 +1,4 @@
 ---
-# The SSH role may have queued a restart. Apply it before the firewall starts
-# denying port 22, otherwise a remote run has a window where neither the old
-# nor the new port is reachable.
-- name: Apply queued SSH handler before changing the firewall
-  ansible.builtin.meta: flush_handlers
-
 - name: Apply the Debian/Ubuntu firewall configuration
   ansible.builtin.include_tasks: ufw.yml
   when: is_debian | bool

@@ -1,0 +1,93 @@
+---
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+# Docker and CrowdSec are installed by their own roles because they may need a
+# third-party repository (Docker CE on all supported distributions, CrowdSec
+# on the RHEL family).
+base_packages_common:
+  - sudo
+  - wget
+  - git
+  - ca-certificates
+  - kmod
+  - openssh-server
+
+base_packages_debian:
+  - curl
+  - openssh-client
+  - procps
+  - ufw
+  - mtr
+  - zram-tools
+  - unattended-upgrades
+  - rsyslog
+
+base_packages_rhel:
+  - openssh-clients
+  - procps-ng
+  - firewalld
+  - python3-firewall
+  - policycoreutils-python-utils
+  - dnf-plugins-core
+  - mtr
+  - zram-generator
+  - dnf-automatic
+  # Provides needs-restarting, used for reboot reporting.
+  - yum-utils
+
+# ---------------------------------------------------------------------------
+# Time synchronisation (chrony). Skipped inside containers: they use the clock
+# of the host.
+# ---------------------------------------------------------------------------
+base_time_sync: true
+base_packages_time_sync:
+  - chrony
+base_time_sync_service: "{{ 'chronyd' if ansible_facts['os_family'] == 'RedHat' else 'chrony' }}"
+
+# ---------------------------------------------------------------------------
+# journald: cap the disk space used by the journal. Empty string = do not touch.
+# ---------------------------------------------------------------------------
+base_journald_max_use: 500M
+base_journald_config: /etc/systemd/journald.conf.d/99-ansible.conf
+
+# ---------------------------------------------------------------------------
+# Automatic security updates
+# ---------------------------------------------------------------------------
+# Debian/Ubuntu: unattended-upgrades. RHEL family: dnf-automatic.
+auto_updates_enabled: true
+# Reboot automatically after updates that need it (kernel, glibc, ...).
+# Debian/Ubuntu: at auto_reboot_time. RHEL: dnf-automatic "reboot = when-needed"
+# (needs a recent dnf-automatic; older releases ignore the option).
+auto_reboot: false
+auto_reboot_time: "04:00"
+apt_auto_upgrades_config: /etc/apt/apt.conf.d/20auto-upgrades
+apt_unattended_reboot_config: /etc/apt/apt.conf.d/52ansible-unattended-upgrades
+dnf_automatic_config: /etc/dnf/automatic.conf
+dnf_automatic_timer: dnf-automatic.timer
+
+# ---------------------------------------------------------------------------
+# trippy (traceroute/ping TUI). Debian 13 ships it; everywhere else the
+# upstream release is installed and pinned by SHA-256. Set to false to skip it
+# (mtr is installed anyway) and avoid maintaining the pins below.
+# ---------------------------------------------------------------------------
+base_install_trippy: true
+trippy_version: "0.13.0"
+trippy_rpm_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy-{{ trippy_version }}-x86_64.rpm"
+trippy_rpm_checksum: "sha256:7c845f29d7cc7cc588609949442673b8f4b37b7c0d8142d16305355a48b1b217"
+trippy_rpm_path: "/tmp/trippy-{{ trippy_version }}-x86_64.rpm"
+trippy_deb_url: "https://github.com/fujiapple852/trippy/releases/download/{{ trippy_version }}/trippy_x86_64-unknown-linux-gnu_{{ trippy_version }}_amd64.deb"
+trippy_deb_checksum: "sha256:8fe6e4677399ab5b7b2e75925b913b922ffa3785875b04588a8eca8270349007"
+trippy_deb_path: "/tmp/trippy_{{ trippy_version }}_amd64.deb"
+trippy_tarball_arch: "{{ 'aarch64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'x86_64' }}"
+trippy_tarball_url: >-
+  {{ ('https://github.com/fujiapple852/trippy/releases/download/'
+      ~ trippy_version ~ '/trippy-' ~ trippy_version ~ '-'
+      ~ trippy_tarball_arch ~ '-unknown-linux-gnu.tar.gz') }}
+trippy_tarball_checksum: >-
+  {{ 'sha256:c4245db59d3251df3c3045752d931afbed00b97896adeb93be62bf0bf3933f09'
+     if trippy_tarball_arch == 'x86_64'
+     else 'sha256:0afa3fc574066ff0d91d9e81ec0da012822c83bb39f691f52b562f9b6bbdaae3' }}
+trippy_tarball_path: "/tmp/trippy-{{ trippy_version }}.tar.gz"
+trippy_extract_dir: "/tmp/trippy-{{ trippy_version }}"
+trippy_tarball_member: "trippy-{{ trippy_version }}-{{ trippy_tarball_arch }}-unknown-linux-gnu/trip"

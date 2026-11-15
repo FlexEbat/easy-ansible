@@ -21,6 +21,14 @@
       GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX ipv6.disable=1"
       GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT ipv6.disable=1"
   register: ipv6_grub_config
+  when: disable_ipv6 | bool
+
+- name: Remove the IPv6-disable kernel parameter when IPv6 stays enabled
+  ansible.builtin.file:
+    path: "{{ ipv6_grub_dropin }}"
+    state: absent
+  register: ipv6_grub_removed
+  when: not (disable_ipv6 | bool)
 
 - name: Check whether update-grub is available
   ansible.builtin.stat:
@@ -31,7 +39,7 @@
   ansible.builtin.command:
     cmd: /usr/sbin/update-grub
   when:
-    - ipv6_grub_config is changed
+    - ipv6_grub_config is changed or ipv6_grub_removed is changed
     - update_grub.stat.exists
   changed_when: true
 
@@ -54,7 +62,7 @@
   changed_when: false
   failed_when: false
   check_mode: false
-  when: ansible_virtualization_type not in ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+  when: not (is_container | bool)
 
 - name: Check for a zram device
   ansible.builtin.stat:
@@ -66,8 +74,7 @@
 - name: Remember whether zram is usable on this host
   ansible.builtin.set_fact:
     zram_usable: >-
-      {{ ansible_virtualization_type not in
-         ['lxc', 'docker', 'podman', 'containerd', 'systemd-nspawn']
+      {{ not (is_container | bool)
          and ((zram_modprobe.rc | default(1)) == 0
               or zram_device.stat.exists) }}
 
@@ -81,19 +88,19 @@
   ansible.builtin.systemd_service:
     name: zramswap
     state: "{{ 'restarted' if zram_config is changed else 'started' }}"
-  when: zram_usable
+  when: zram_usable | bool
 
 - name: Keep zramswap stopped when zram is unavailable
   ansible.builtin.systemd_service:
     name: zramswap
     state: stopped
-  when: not zram_usable
+  when: not (zram_usable | bool)
 
 - name: Explain why zram was not started
   ansible.builtin.debug:
     msg: >-
       The zram configuration is in /etc/default/zramswap, but zram is
       unavailable or cannot be managed inside this
-      {{ ansible_virtualization_type }} environment. zramswap was left
+      {{ ansible_facts['virtualization_type'] | default('unknown') }} environment. zramswap was left
       disabled.
-  when: not zram_usable
+  when: not (zram_usable | bool)

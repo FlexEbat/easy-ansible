@@ -176,8 +176,9 @@
   notify: Restart crowdsec
 
 # ---------------------------------------------------------------------------
-# Whitelist the host itself, its local network and any explicit management
-# addresses so CrowdSec cannot lock the operator out.
+# Whitelist the host itself and the explicitly configured management
+# addresses so CrowdSec cannot lock the operator out. The host's whole network
+# is deliberately not added: on a VPS it is the provider's subnet.
 # ---------------------------------------------------------------------------
 - name: Build the CrowdSec whitelist entries
   ansible.builtin.set_fact:
@@ -185,10 +186,7 @@
       {{ (['127.0.0.1', '::1'] + crowdsec_whitelist_ips
           + ([ansible_facts['default_ipv4']['address']]
              if ansible_facts.get('default_ipv4') else [])) | unique }}
-    crowdsec_whitelist_effective_cidrs: >-
-      {{ (crowdsec_whitelist_cidrs
-          + ([ansible_facts['default_ipv4']['network'] ~ '/' ~ ansible_facts['default_ipv4']['prefix']]
-             if ansible_facts.get('default_ipv4') else [])) | unique }}
+    crowdsec_whitelist_effective_cidrs: "{{ crowdsec_whitelist_cidrs | unique }}"
 
 - name: Ensure the CrowdSec whitelist directory exists
   ansible.builtin.file:

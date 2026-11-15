@@ -1,8 +1,12 @@
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "{{ docker_log_max_size }}",
-    "max-file": "{{ docker_log_max_file }}"
-  },
-  "live-restore": {{ docker_live_restore | bool | to_json }}
-}
+{% set cfg = {
+     'log-driver': 'json-file',
+     'log-opts': {'max-size': docker_log_max_size, 'max-file': docker_log_max_file | string},
+     'live-restore': docker_live_restore | bool
+   } %}
+{% if docker_default_bind_ip | length > 0 %}
+{% set _ = cfg.update({'ip': docker_default_bind_ip}) %}
+{% endif %}
+{% if docker_no_new_privileges | bool %}
+{% set _ = cfg.update({'no-new-privileges': true}) %}
+{% endif %}
+{{ cfg | to_nice_json }}
