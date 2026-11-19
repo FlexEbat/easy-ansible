@@ -1,8 +1,6 @@
 ---
-# ansible-core 2.14 (RHEL 9 AppStream) cannot load the newest collection
-# releases, so stay on the last major versions that still support it.
+# Collections used by the playbook. No versions are pinned: the latest
+# releases are installed.
 collections:
   - name: ansible.posix
-    version: ">=1.5.4,<2.0.0"
   - name: community.general
-    version: ">=8.0.0,<9.0.0"

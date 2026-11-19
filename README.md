@@ -536,10 +536,6 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 ├── wizard.sh                  # мастер вопросов, создаёт vars.local.yml
 ├── vars.example.yml           # справочник по всем настройкам
 ├── verify.sh
-├── .ansible-lint
-├── .yamllint
-├── .github/workflows/ci.yml
-├── molecule/default/          # Molecule (Debian 13, Ubuntu 24.04, Rocky 9; Rocky 8 — best effort)
 └── roles/                     # у каждой роли свои defaults/main.yml
     ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
     ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
@@ -549,40 +545,6 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
     ├── kernel/        # BBR, IPv6, sysctl hardening, zram
     └── docker/        # официальный Docker CE и daemon.json
 ```
-
-## Тесты и линтеры
-
-Molecule-сценарий поднимает контейнеры (Debian 13, Ubuntu 24.04, Rocky 9 и экспериментально Rocky 8) и для каждого прогоняет
-`converge → idempotence → verify`. Повторный прогон обязан дать `changed=0`.
-
-```bash
-pip install ansible-core ansible-lint yamllint molecule 'molecule-plugins[docker]'
-ansible-galaxy collection install -r requirements.yml
-ansible-galaxy collection install -r molecule/default/requirements.yml
-
-yamllint .
-ansible-lint
-
-# по одной платформе
-molecule test -p debian13
-molecule test -p ubuntu2404
-molecule test -p rockylinux9
-molecule test -p rockylinux8   # best effort
-
-shellcheck verify.sh run.sh wizard.sh
-```
-
-Платформы: `geerlingguy/docker-debian13-ansible`,
-`geerlingguy/docker-ubuntu2404-ansible`,
-`geerlingguy/docker-rockylinux9-ansible` (AlmaLinux 9 покрывается тем же
-RHEL-семейством). Для systemd контейнеры запускаются с
-`/lib/systemd/systemd` (RHEL — `/usr/lib/systemd/systemd`), `privileged`,
-`cgroupns_mode: host` и монтированием `/sys/fs/cgroup`.
-
-GitHub Actions (`.github/workflows/ci.yml`) запускает `yamllint`,
-`ansible-lint`, `shellcheck` и матрицу Molecule. Rocky 8 в CI помечен как
-`continue-on-error`: RHEL 8 заявлен как поддерживаемый, но не гарантирован
-автотестами (системный Python 3.6 слишком стар для свежих `ansible-core`).
 
 ## Безопасность и ограничения
 
