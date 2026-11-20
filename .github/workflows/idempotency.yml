@@ -106,12 +106,12 @@ jobs:
         run: |
           set -o pipefail
           ~/venv/bin/ansible-playbook -i target, -c community.docker.docker site.yml \
-            -e @ci/vars-default.yml -e admin_user=root 2>&1 | tee first-run.log
+            -e @ci/vars-default.yml -e admin_user=root -e ansible_become=false 2>&1 | tee first-run.log
       - name: Second run (must not change anything)
         run: |
           set -o pipefail
           ~/venv/bin/ansible-playbook -i target, -c community.docker.docker site.yml \
-            -e @ci/vars-default.yml -e admin_user=root 2>&1 | tee second-run.log
+            -e @ci/vars-default.yml -e admin_user=root -e ansible_become=false 2>&1 | tee second-run.log
           if ! grep -Eq 'changed=0[[:space:]]+unreachable=0[[:space:]]+failed=0' second-run.log; then
             echo "::error::the second run changed something on ${{ matrix.os }}"
             exit 1
