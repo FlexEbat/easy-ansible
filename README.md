@@ -1,7 +1,8 @@
 # easy-ansible
 
-Ansible-плейбук, который за один запуск приводит свежий Debian/Ubuntu или
-RHEL-совместимый Linux к безопасному и удобному состоянию: обновления,
+Ansible-плейбук, который за один запуск приводит свежий Debian/Ubuntu к
+безопасному и удобному состоянию (RHEL-совместимые системы — без гарантий,
+см. [Поддерживаемые ОС](#поддерживаемые-ос)): обновления,
 firewall, защита от перебора (CrowdSec), Docker, сетевая и ядерная
 оптимизация. Подходит и для **домашнего компьютера**, и для **сервера (VPS)**;
 запускается на самой машине или удалённо.
@@ -41,8 +42,14 @@ firewall, защита от перебора (CrowdSec), Docker, сетевая 
 
 | Семейство | Дистрибутивы | Пакеты | Firewall | sudo-группа | zram |
 |---|---|---|---|---|---|
-| Debian | Debian 13+, Ubuntu 24.04+ | `apt` | `ufw` | `sudo` | `zram-tools` |
-| RHEL | RHEL 8/9, AlmaLinux, Rocky, CentOS Stream, Oracle Linux | `dnf` | `firewalld` | `wheel` | `zram-generator` |
+| Debian | Debian 13+, Ubuntu 24.04+ — **поддерживаются** | `apt` | `ufw` | `sudo` | `zram-tools` |
+| RHEL | RHEL 8/9, AlmaLinux, Rocky, CentOS Stream, Oracle Linux — **без гарантий** | `dnf` | `firewalld` | `wheel` | `zram-generator` |
+
+Основная поддерживаемая платформа — Debian и Ubuntu. Код для RHEL-семейства в
+плейбуке есть, но на нём возможны проблемы: он не покрыт автотестами, а
+системный `ansible-core` в RHEL 8/9 старый (на RHEL 8 системный Python 3.6 слишком
+стар для свежих версий Ansible и коллекций, которые ставятся без закрепления
+версий). Используйте его на свой страх и риск.
 
 Debian 12 и Ubuntu 22.04 больше не поддерживаются: для них нет актуальных
 пакетов CrowdSec/Docker в нужной конфигурации. Плейбук проверяет ОС в начале и
@@ -382,9 +389,9 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
   (`upgrade_type = default`, `apply_updates` управляется
   `auto_updates_enabled`).
 - `trippy` (`roles/base/tasks/trippy.yml`, общий для обоих семейств) ставится
-  из репозитория дистрибутива, если доступен; иначе загружается upstream-артефакт
-  с проверкой SHA-256 (`.deb`/RPM для x86_64, tarball для aarch64). На других
-  архитектурах пропускается. Отключается `base_install_trippy=false`.
+  только из репозиториев дистрибутива (`apt`/`dnf`), всегда последней
+  доступной там версии; ничего не закреплено. Если в репозиториях пакета нет,
+  шаг пропускается (остаётся `mtr`). Отключается `base_install_trippy=false`.
 - `chrony` (синхронизация времени; не в контейнерах) и лимит `journald`
   (`/etc/systemd/journald.conf.d/99-ansible.conf`).
 - `auto_reboot=true` включает автоперезагрузку после обновлений

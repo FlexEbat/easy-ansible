@@ -1,11 +1,7 @@
 ---
-# Shared by the Debian and RHEL families. The method is picked once:
-#   none        already installed
-#   distro      Debian 13 and any apt repository that provides "trippy"
-#   deb         upstream .deb (Debian family, x86_64)
-#   rpm         upstream .rpm (RHEL family, x86_64)
-#   tarball     upstream binary (aarch64)
-#   unsupported architecture without a pinned upstream build
+# trippy is installed only from the distribution's package manager, so the
+# latest packaged version is used and nothing is pinned. When the repository
+# does not provide it, the step is skipped (mtr is installed anyway).
 - name: Check whether trippy is already installed
   ansible.builtin.command:
     cmd: sh -c 'command -v trippy || command -v trip'
@@ -14,7 +10,7 @@
   failed_when: false
   check_mode: false
 
-- name: Check whether the distribution repository provides trippy
+- name: Check whether the apt repository provides trippy
   ansible.builtin.command:
     cmd: apt-cache show trippy
   register: trippy_apt_available
@@ -25,92 +21,48 @@
     - trippy_check.rc != 0
     - is_debian | bool
 
-- name: Decide how trippy should be installed
-  ansible.builtin.set_fact:
-    trippy_method: >-
-      {{ 'none' if trippy_check.rc == 0
-         else 'distro' if is_debian | bool and (trippy_apt_available.rc | default(1)) == 0
-         else 'unsupported' if ansible_facts['architecture'] not in ['x86_64', 'aarch64', 'arm64']
-         else 'tarball' if ansible_facts['architecture'] != 'x86_64'
-         else 'deb' if is_debian | bool
-         else 'rpm' }}
+- name: Check whether the dnf repositories provide trippy
+  ansible.builtin.command:
+    cmd: dnf -q list --available trippy
+  register: trippy_dnf_available
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - trippy_check.rc != 0
+    - is_rhel | bool
 
-- name: Report an architecture without a pinned trippy build
+- name: Decide whether trippy can be installed from the repositories
+  ansible.builtin.set_fact:
+    trippy_installable: >-
+      {{ trippy_check.rc != 0
+         and ((is_debian | bool and (trippy_apt_available.rc | default(1)) == 0)
+              or (is_rhel | bool and (trippy_dnf_available.rc | default(1)) == 0)) }}
+
+- name: Report that trippy is not available in the repositories
   ansible.builtin.debug:
     msg: >-
-      trippy has no pinned upstream build for {{ ansible_facts['architecture'] }};
-      skipping it (mtr is installed).
-  when: trippy_method == 'unsupported'
+      trippy is not provided by the {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }} repositories; skipping it
+      (mtr is installed).
+  when:
+    - trippy_check.rc != 0
+    - not (trippy_installable | bool)
 
-- name: Install trippy from the distribution repository
+- name: Install trippy with apt
   ansible.builtin.apt:
     name: trippy
     state: present
   environment:
     DEBIAN_FRONTEND: noninteractive
-  when: trippy_method == 'distro'
+  when:
+    - trippy_installable | bool
+    - is_debian | bool
 
-- name: Download the upstream trippy .deb
-  ansible.builtin.get_url:
-    url: "{{ trippy_deb_url }}"
-    dest: "{{ trippy_deb_path }}"
-    checksum: "{{ trippy_deb_checksum }}"
-    mode: "0644"
-  when: trippy_method == 'deb'
-
-- name: Install the upstream trippy .deb
-  ansible.builtin.apt:
-    deb: "{{ trippy_deb_path }}"
-    state: present
-  environment:
-    DEBIAN_FRONTEND: noninteractive
-  when: trippy_method == 'deb'
-
-- name: Download the upstream trippy RPM
-  ansible.builtin.get_url:
-    url: "{{ trippy_rpm_url }}"
-    dest: "{{ trippy_rpm_path }}"
-    checksum: "{{ trippy_rpm_checksum }}"
-    mode: "0644"
-  when: trippy_method == 'rpm'
-
-# The upstream RPM is not signed, so dnf's package signature check cannot be
-# used. Integrity is enforced by the pinned SHA-256 checksum above.
-- name: Install the upstream trippy RPM
+- name: Install trippy with dnf
   ansible.builtin.dnf:
-    name: "{{ trippy_rpm_path }}"
+    name: trippy
     state: present
-    disable_gpg_check: true
-  when: trippy_method == 'rpm'
-
-- name: Install the upstream trippy tarball build
-  when: trippy_method == 'tarball'
-  block:
-    - name: Download the trippy tarball
-      ansible.builtin.get_url:
-        url: "{{ trippy_tarball_url }}"
-        dest: "{{ trippy_tarball_path }}"
-        checksum: "{{ trippy_tarball_checksum }}"
-        mode: "0644"
-
-    - name: Ensure the trippy extraction directory exists
-      ansible.builtin.file:
-        path: "{{ trippy_extract_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Extract the trippy tarball
-      ansible.builtin.unarchive:
-        src: "{{ trippy_tarball_path }}"
-        dest: "{{ trippy_extract_dir }}"
-        remote_src: true
-        creates: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-
-    - name: Copy the trippy binary into /usr/local/bin
-      ansible.builtin.copy:
-        src: "{{ trippy_extract_dir }}/{{ trippy_tarball_member }}"
-        dest: /usr/local/bin/trip
-        remote_src: true
-        mode: "0755"
+  when:
+    - trippy_installable | bool
+    - is_rhel | bool
