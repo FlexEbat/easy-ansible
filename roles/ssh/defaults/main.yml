@@ -21,7 +21,7 @@ ssh_x11_forwarding: false
 ssh_dropin_file: /etc/ssh/sshd_config.d/00-ansible-hardening.conf
 ssh_service: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
 # OpenSSH 8.7 renamed ChallengeResponseAuthentication to
-# KbdInteractiveAuthentication; RHEL 8 still ships OpenSSH 8.0.
+# KbdInteractiveAuthentication.
 ssh_kbd_interactive_option: >-
   {{ 'KbdInteractiveAuthentication'
      if ansible_facts['os_family'] == 'Debian' or ansible_facts['distribution_major_version'] | int >= 9
@@ -44,7 +44,7 @@ ssh_allow_users: []
 ssh_allow_groups: []
 
 # Only modern key exchange / cipher / MAC algorithms (ssh_modern_crypto=true).
-# The list works on OpenSSH 8.0 (RHEL 8) and newer; very old clients will no
+# The list works on every supported OS (OpenSSH 8.9+); very old clients will no
 # longer connect.
 ssh_modern_crypto: false
 ssh_kex_algorithms: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"

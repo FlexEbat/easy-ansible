@@ -16,12 +16,12 @@
             or (ansible_facts['distribution'] == 'Ubuntu'
                 and ansible_facts['distribution_version'] is version('24.04', '>='))
             or (ansible_facts['os_family'] == 'RedHat'
-                and ansible_facts['distribution_major_version'] | int >= 8)
+                and ansible_facts['distribution_major_version'] | int >= 9)
         fail_msg: >-
           Unsupported operating system: {{ ansible_facts['distribution'] }}
           {{ ansible_facts['distribution_version'] }} (family
           {{ ansible_facts['os_family'] }}). Supported: Debian 13+,
-          Ubuntu 24.04+, RHEL 8+ (RedHat, CentOS, Rocky, AlmaLinux,
+          Ubuntu 24.04+, RHEL 9+ (RedHat, CentOS, Rocky, AlmaLinux,
           Oracle Linux).
         success_msg: >-
           Supported operating system: {{ ansible_facts['distribution'] }}
