@@ -1,0 +1,45 @@
+---
+- name: Extra sysctl hardening
+  ansible.builtin.import_tasks: sysctl.yml
+  tags: [hardening, sysctl]
+
+- name: sudo hardening
+  ansible.builtin.import_tasks: sudo.yml
+  tags: [hardening, sudo]
+
+- name: Password policy
+  ansible.builtin.import_tasks: pwquality.yml
+  tags: [hardening, pwquality]
+
+- name: Core dumps
+  ansible.builtin.import_tasks: coredump.yml
+  tags: [hardening, coredump]
+
+- name: Kernel module blacklist
+  ansible.builtin.import_tasks: modules.yml
+  tags: [hardening, modules]
+
+- name: Login banner
+  ansible.builtin.import_tasks: banner.yml
+  tags: [hardening, banner]
+
+- name: cron and at restrictions
+  ansible.builtin.import_tasks: cron.yml
+  tags: [hardening, cron]
+
+- name: Mandatory access control
+  ansible.builtin.import_tasks: mac.yml
+  tags: [hardening, mac]
+
+- name: auditd
+  ansible.builtin.import_tasks: auditd.yml
+  tags: [hardening, auditd]
+
+- name: Lynis
+  ansible.builtin.import_tasks: lynis.yml
+  tags: [hardening, lynis]
+
+# Last: it needs to know whether the sudo log exists.
+- name: logrotate
+  ansible.builtin.import_tasks: logrotate.yml
+  tags: [hardening, logrotate]

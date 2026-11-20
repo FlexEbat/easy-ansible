@@ -1,0 +1,155 @@
+---
+# ---------------------------------------------------------------------------
+# Debian / Ubuntu: AppArmor
+# ---------------------------------------------------------------------------
+- name: Set up AppArmor
+  when:
+    - harden_mac | bool
+    - is_debian | bool
+    - not (is_container | bool)
+  block:
+    - name: Install and update the AppArmor packages
+      ansible.builtin.apt:
+        name: [apparmor, apparmor-utils, apparmor-profiles]
+        state: latest  # noqa: package-latest
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Ensure the GRUB drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ harden_apparmor_grub_dropin | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Make sure AppArmor is enabled on the kernel command line
+      ansible.builtin.copy:
+        dest: "{{ harden_apparmor_grub_dropin }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX apparmor=1 security=apparmor"
+      register: harden_apparmor_grub
+
+    - name: Check whether update-grub is available
+      ansible.builtin.stat:
+        path: /usr/sbin/update-grub
+      register: harden_update_grub
+
+    - name: Regenerate the GRUB configuration
+      ansible.builtin.command:
+        cmd: /usr/sbin/update-grub
+      changed_when: true
+      when:
+        - harden_apparmor_grub is changed
+        - harden_update_grub.stat.exists
+
+    - name: Ensure the AppArmor service is enabled and running
+      ansible.builtin.systemd_service:
+        name: apparmor
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Read the AppArmor kernel state
+      ansible.builtin.command:
+        cmd: cat /sys/module/apparmor/parameters/enabled
+      register: harden_apparmor_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Tell that a reboot is needed to activate AppArmor
+      ansible.builtin.set_fact:
+        reboot_required: true
+      when: harden_apparmor_state.stdout | default('') | trim != 'Y'
+
+    - name: Warn when AppArmor is not active yet
+      ansible.builtin.debug:
+        msg: "AppArmor is not active in the running kernel: reboot, then run the playbook again."
+      when: harden_apparmor_state.stdout | default('') | trim != 'Y'
+
+    - name: List profiles in complain mode
+      ansible.builtin.command:
+        cmd: aa-status --complaining
+      register: harden_apparmor_complain
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: harden_apparmor_state.stdout | default('') | trim == 'Y'
+
+    - name: Report profiles that are not enforced
+      ansible.builtin.debug:
+        msg: "{{ harden_apparmor_complain.stdout_lines[0] | default('') }} (aa-enforce switches a profile to enforce mode)."
+      when:
+        - harden_apparmor_complain.stdout_lines | default([]) | length > 0
+        - harden_apparmor_complain.stdout_lines[0] | default('') is not match('^0 ')
+
+- name: Remove the AppArmor GRUB drop-in
+  ansible.builtin.file:
+    path: "{{ harden_apparmor_grub_dropin }}"
+    state: absent
+  register: harden_apparmor_grub_removed
+  when:
+    - not (harden_mac | bool)
+    - is_debian | bool
+
+- name: Regenerate the GRUB configuration after removing the drop-in
+  ansible.builtin.command:
+    cmd: /usr/sbin/update-grub
+  changed_when: true
+  failed_when: false
+  when:
+    - is_debian | bool
+    - harden_apparmor_grub_removed is changed
+
+# ---------------------------------------------------------------------------
+# RHEL family: SELinux
+# ---------------------------------------------------------------------------
+- name: Set up SELinux
+  when:
+    - harden_mac | bool
+    - is_rhel | bool
+    - not (is_container | bool)
+  block:
+    - name: Install and update the SELinux packages
+      ansible.builtin.dnf:
+        name:
+          - selinux-policy-targeted
+          - policycoreutils
+          - policycoreutils-python-utils
+          - python3-libselinux
+          - container-selinux
+        state: latest  # noqa: package-latest
+
+    - name: Read the SELinux state
+      ansible.builtin.setup:
+        gather_subset: [selinux]
+
+    - name: Switch a disabled SELinux to permissive first
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+      when: ansible_facts['selinux']['status'] | default('disabled') == 'disabled'
+
+    - name: Ask for a full relabel on the next boot
+      ansible.builtin.file:
+        path: /.autorelabel
+        state: touch
+        access_time: preserve
+        modification_time: preserve
+      when: ansible_facts['selinux']['status'] | default('disabled') == 'disabled'
+
+    - name: Tell that SELinux needs a reboot and a second run
+      ansible.builtin.set_fact:
+        reboot_required: true
+      when: ansible_facts['selinux']['status'] | default('disabled') == 'disabled'
+
+    - name: Put SELinux into the requested mode
+      ansible.posix.selinux:
+        policy: targeted
+        state: "{{ harden_selinux_mode }}"
+      when: ansible_facts['selinux']['status'] | default('disabled') != 'disabled'

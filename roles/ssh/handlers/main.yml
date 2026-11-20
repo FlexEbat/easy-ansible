@@ -4,3 +4,11 @@
   ansible.builtin.systemd_service:
     name: "{{ ssh_service }}"
     state: reloaded
+
+# Socket-activated sshd (Ubuntu 24.04): the listening port belongs to
+# ssh.socket. Restarting the socket does not touch running sessions.
+- name: Apply the ssh socket port
+  ansible.builtin.systemd_service:
+    name: ssh.socket
+    state: restarted
+    daemon_reload: true

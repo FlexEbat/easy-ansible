@@ -51,3 +51,13 @@ docker_ce_packages:
   - containerd.io
   - docker-buildx-plugin
   - docker-compose-plugin
+
+# Scheduled cleanup (systemd timer, weekly). OFF by default. It removes
+# stopped containers, unused networks, dangling images and build cache that
+# are older than docker_prune_until. Volumes are NEVER touched unless
+# docker_prune_volumes=true (that deletes data of unused volumes!).
+docker_prune_enabled: false
+docker_prune_until: 168h
+docker_prune_all_images: false
+docker_prune_volumes: false
+docker_prune_schedule: weekly

@@ -1,0 +1,20 @@
+---
+- name: Apply the extra sysctl hardening
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ harden_sysctl_file }}"
+  changed_when: false
+  failed_when: false
+  when: not (is_container | bool)
+
+- name: Apply the core dump sysctl
+  ansible.builtin.command:
+    cmd: "sysctl -p {{ harden_coredump_sysctl_file }}"
+  changed_when: false
+  failed_when: false
+  when: not (is_container | bool)
+
+- name: Reload the audit rules
+  ansible.builtin.command:
+    cmd: augenrules --load
+  changed_when: true
+  when: not (is_container | bool)

@@ -88,6 +88,8 @@ JOURNALD_MAX_USE=$(json_get base_journald_max_use)
 RP_FILTER=$(json_get kernel_rp_filter)
 LOG_MARTIANS=$(json_get kernel_log_martians)
 SSH_PERMIT_ROOT_LOGIN=$(json_get ssh_permit_root_login)
+SSH_PORT=$(json_get ssh_port)
+SSH_PORT="${SSH_PORT:-22}"
 
 container_type=$(systemd-detect-virt --container 2>/dev/null || true)
 is_container() { [ -n "$container_type" ] && [ "$container_type" != "none" ]; }
@@ -127,16 +129,38 @@ if json_true base_install_trippy; then
 fi
 
 section "SSH"
-if ss -ltnH "sport = :22" | grep -q .; then
-  pass "sshd is listening on port 22"
+if ss -ltnH "sport = :$SSH_PORT" | grep -q .; then
+  pass "sshd is listening on port $SSH_PORT"
 else
-  fail "sshd is not listening on port 22"
+  fail "sshd is not listening on port $SSH_PORT"
 fi
 
-if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
-  pass "sshd effective config uses port 22"
+if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx "$SSH_PORT"; then
+  pass "sshd effective config uses port $SSH_PORT"
 else
-  fail "sshd effective config does not use port 22"
+  fail "sshd effective config does not use port $SSH_PORT"
+fi
+
+if [ "$SSH_PORT" != "22" ] && sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
+  fail "sshd still listens on port 22 next to $SSH_PORT (explicit Port line elsewhere?)"
+fi
+
+if json_true ssh_harden_extra; then
+  if sshd -T 2>/dev/null | grep -qx "logingracetime 30" &&
+     sshd -T 2>/dev/null | grep -qx "allowtcpforwarding yes"; then
+    pass "extra sshd settings are active (TCP forwarding stays allowed for tunnels/proxies)"
+  else
+    fail "extra sshd settings are not active"
+  fi
+fi
+
+if json_true ssh_modern_crypto; then
+  if sshd -T 2>/dev/null | grep -q '^ciphers .*chacha20-poly1305' &&
+     ! sshd -T 2>/dev/null | grep -q '^ciphers .*aes128-cbc'; then
+    pass "SSH uses only the modern cipher list"
+  else
+    fail "SSH cipher list is not the modern one"
+  fi
 fi
 
 if json_true ssh_harden; then
@@ -182,10 +206,10 @@ if [ "$FIREWALL_BACKEND" = "ufw" ]; then
   else
     ssh_action="ALLOW"
   fi
-  if ufw status 2>/dev/null | grep -qE "^22/tcp[[:space:]]+${ssh_action}"; then
-    pass "UFW rule for SSH on port 22 is $ssh_action"
+  if ufw status 2>/dev/null | grep -qE "^${SSH_PORT}/tcp[[:space:]]+${ssh_action}"; then
+    pass "UFW rule for SSH on port $SSH_PORT is $ssh_action"
   else
-    fail "UFW has no $ssh_action rule for SSH on port 22"
+    fail "UFW has no $ssh_action rule for SSH on port $SSH_PORT"
   fi
 
   for spec in $FIREWALL_ALLOWED_PORTS; do
@@ -203,10 +227,16 @@ else
     fail "firewalld is not active"
   fi
 
-  if firewall-cmd --zone="$ZONE" --list-services 2>/dev/null | tr ' ' '\n' | grep -qx ssh; then
-    pass "firewalld allows the SSH service"
+  if [ "$SSH_PORT" = "22" ]; then
+    if firewall-cmd --zone="$ZONE" --list-services 2>/dev/null | tr ' ' '\n' | grep -qx ssh; then
+      pass "firewalld allows the SSH service"
+    else
+      fail "firewalld does not allow the SSH service"
+    fi
+  elif firewall-cmd --zone="$ZONE" --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "$SSH_PORT/tcp"; then
+    pass "firewalld allows the SSH port $SSH_PORT/tcp"
   else
-    fail "firewalld does not allow the SSH service"
+    fail "firewalld does not allow the SSH port $SSH_PORT/tcp"
   fi
 
   for spec in $FIREWALL_ALLOWED_PORTS; do
@@ -560,7 +590,7 @@ else
 fi
 
 section "Listening ports"
-ALLOWED_PORTS="22"
+ALLOWED_PORTS="22 $SSH_PORT"
 for spec in $FIREWALL_ALLOWED_PORTS; do
   ALLOWED_PORTS="$ALLOWED_PORTS ${spec%%/*}"
 done
@@ -582,6 +612,141 @@ if [ -z "$unexpected" ]; then
   pass "no unexpected external TCP listeners"
 else
   fail "unexpected external TCP listeners:$unexpected"
+fi
+
+section "Optional hardening"
+# Each check runs only for a feature that was switched on; features that were
+# not asked for are not mentioned.
+if json_true harden_sysctl; then
+  ok=1
+  for key in $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).get("harden_sysctl_keys", [])))' "$SUMMARY"); do
+    grep -Eq "^${key//./\\.}[[:space:]]*=" /etc/sysctl.d/99-ansible-hardening-extra.conf 2>/dev/null || ok=0
+  done
+  if [ "$ok" -eq 1 ]; then pass "extra sysctl hardening file is complete"; else fail "extra sysctl hardening file is incomplete"; fi
+fi
+
+if json_true harden_sudo; then
+  SUDO_FILE=$(json_get harden_sudo_file)
+  if [ -f "$SUDO_FILE" ] && grep -q '^Defaults use_pty' "$SUDO_FILE" && visudo -cf "$SUDO_FILE" >/dev/null 2>&1; then
+    pass "sudo hardening drop-in is valid (use_pty, logfile, timeout)"
+  else
+    fail "sudo hardening drop-in is missing or invalid"
+  fi
+  if [ "$ADMIN_USER" != "root" ]; then
+    if su - "$ADMIN_USER" -c 'sudo -n true || sudo -n -l' >/dev/null 2>&1 || ! json_true admin_user_sudo_nopasswd; then
+      pass "sudo still works for $ADMIN_USER with the hardening on"
+    else
+      fail "sudo does not work for $ADMIN_USER with the hardening on"
+    fi
+  fi
+fi
+
+if json_true harden_password_policy; then
+  if grep -q '^minlen' /etc/security/pwquality.conf.d/99-ansible.conf 2>/dev/null; then
+    pass "password policy (pwquality) is configured"
+  else
+    fail "password policy (pwquality) is missing"
+  fi
+fi
+
+if json_true harden_coredumps; then
+  if grep -q 'core 0' /etc/security/limits.d/99-ansible-nocore.conf 2>/dev/null &&
+     grep -q '^Storage=none' /etc/systemd/coredump.conf.d/99-ansible.conf 2>/dev/null; then
+    pass "core dumps are disabled (limits.d, systemd-coredump)"
+  else
+    fail "core dump configuration is incomplete"
+  fi
+  if ! is_container; then
+    expect_eq "kernel suid_dumpable" "$(cat /proc/sys/fs/suid_dumpable 2>/dev/null)" "0"
+  fi
+fi
+
+if json_true harden_kernel_modules; then
+  ok=1
+  for module in $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).get("harden_blacklist_modules", [])))' "$SUMMARY"); do
+    grep -q "^install $module /bin/false" /etc/modprobe.d/99-ansible-blacklist.conf 2>/dev/null || ok=0
+  done
+  if [ "$ok" -eq 1 ]; then pass "kernel module blacklist is present"; else fail "kernel module blacklist is incomplete"; fi
+  # VPN / proxy / Docker modules must stay loadable
+  for module in wireguard tun veth overlay br_netfilter; do
+    if grep -q "^install $module " /etc/modprobe.d/99-ansible-blacklist.conf 2>/dev/null; then
+      fail "module $module is blacklisted (VPN/Docker need it)"
+    fi
+  done
+fi
+
+if json_true harden_banner; then
+  if [ -s "$(json_get harden_banner_file)" ] && [ -s /etc/motd ]; then
+    pass "login banner and /etc/motd are set"
+  else
+    fail "login banner is missing"
+  fi
+fi
+
+if json_true harden_cron_at; then
+  if grep -qx "$ADMIN_USER" /etc/cron.allow 2>/dev/null; then
+    pass "cron.allow contains root and $ADMIN_USER"
+  else
+    fail "cron.allow does not contain $ADMIN_USER"
+  fi
+fi
+
+if json_true harden_mac; then
+  if is_container; then
+    skip "mandatory access control belongs to the host inside $container_type"
+  elif [ "$PKG_MANAGER" = "apt" ]; then
+    if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ] && systemctl is-active --quiet apparmor; then
+      pass "AppArmor is enabled and active"
+    else
+      fail "AppArmor is not active (reboot after the first run, then run the playbook again)"
+    fi
+  elif [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then
+    pass "SELinux is enforcing"
+  else
+    fail "SELinux is not enforcing (reboot after the first run, then run the playbook again)"
+  fi
+fi
+
+if json_true harden_auditd; then
+  if is_container; then
+    skip "auditd is not set up inside $container_type"
+  elif systemctl is-active --quiet auditd && [ -f /etc/audit/rules.d/99-ansible.rules ]; then
+    pass "auditd is active with the playbook rules"
+  else
+    fail "auditd is not active or its rules are missing"
+  fi
+fi
+
+if json_true harden_lynis && [ "$PKG_MANAGER" = "apt" ]; then
+  if command -v lynis >/dev/null 2>&1; then pass "Lynis is installed"; else fail "Lynis is not installed"; fi
+fi
+
+if json_true logrotate_enabled; then
+  if command -v logrotate >/dev/null 2>&1 && logrotate -d /etc/logrotate.conf >/dev/null 2>&1; then
+    pass "logrotate is installed and its configuration parses"
+  else
+    fail "logrotate is missing or its configuration is broken"
+  fi
+fi
+
+if json_true docker_prune_enabled; then
+  if systemctl is-enabled --quiet docker-prune.timer 2>/dev/null; then
+    pass "Docker cleanup timer is enabled"
+  else
+    fail "Docker cleanup timer is not enabled"
+  fi
+fi
+
+if json_true crowdsec_docker_active; then
+  if [ "$CROWDSEC_BOUNCER_MODE" = "iptables" ]; then
+    if iptables -w -S DOCKER-USER 2>/dev/null | grep -q 'crowdsec'; then
+      pass "CrowdSec filters the DOCKER-USER chain (published container ports)"
+    else
+      fail "CrowdSec rules are missing from the DOCKER-USER chain"
+    fi
+  else
+    pass "CrowdSec nftables bouncer is set to filter the forward hook (Docker)"
+  fi
 fi
 
 section "Reboot"

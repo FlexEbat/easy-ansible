@@ -50,3 +50,37 @@ firewall_allowed_ports: []
 # ssh_harden: true
 # ssh_password_auth: false
 # ssh_permit_root_login: "no"
+
+# ---------------------------------------------------------------------------
+# SSH: порт и расширенные настройки (всё необязательно)
+# ---------------------------------------------------------------------------
+# Другой порт SSH; открывается в firewall автоматически (старое правило для
+# порта 22 остаётся, пока не включите firewall_close_old_ssh_port).
+# ssh_port: 2222
+# firewall_close_old_ssh_port: true
+# LoginGraceTime, ClientAlive*, MaxSessions, запрет agent forwarding.
+# TCP-forwarding остаётся разрешённым: SSH-туннели и прокси работают.
+# ssh_harden_extra: true
+# Только современные KEX/шифры/MAC (очень старые клиенты не подключатся).
+# ssh_modern_crypto: true
+# Кому разрешён вход (админ должен быть в списке).
+# ssh_allow_users: [alice]
+
+# ---------------------------------------------------------------------------
+# Дополнительная защита: всё выключено по умолчанию, включайте по пунктам.
+# У каждого пункта свой тег: --tags sudo,auditd
+# ---------------------------------------------------------------------------
+# harden_sysctl: true            # kptr_restrict, ptrace_scope, protected_*, ...
+# harden_sudo: true              # use_pty, отдельный лог, таймаут пароля
+# harden_password_policy: true   # libpwquality: 12 символов, 3 класса
+# harden_coredumps: true         # без core dump
+# harden_kernel_modules: true    # чёрный список dccp, sctp, rds, tipc, cramfs, ...
+# harden_banner: true            # баннер при входе + /etc/motd
+# harden_cron_at: true           # cron/at только root + админ
+# harden_mac: true               # AppArmor / SELinux: включить и обновить
+# harden_auditd: true
+# harden_lynis: true
+# logrotate_enabled: true        # включён по умолчанию
+# docker_prune_enabled: true     # еженедельная очистка Docker (volumes не трогает)
+# crowdsec_docker_protection: true   # включён по умолчанию: CrowdSec фильтрует и порты Docker
+

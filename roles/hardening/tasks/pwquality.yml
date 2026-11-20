@@ -1,0 +1,39 @@
+---
+- name: Install libpwquality
+  ansible.builtin.package:
+    name: "{{ 'libpam-pwquality' if is_debian | bool else 'libpwquality' }}"
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: harden_password_policy | bool
+
+- name: Ensure the pwquality drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ harden_pwquality_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: harden_password_policy | bool
+
+- name: Write the password policy
+  ansible.builtin.copy:
+    dest: "{{ harden_pwquality_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      minlen = {{ harden_pwquality_minlen }}
+      minclass = {{ harden_pwquality_minclass }}
+      maxrepeat = {{ harden_pwquality_maxrepeat }}
+      dictcheck = 1
+      usercheck = 1
+      enforcing = 1
+  when: harden_password_policy | bool
+
+- name: Remove the password policy
+  ansible.builtin.file:
+    path: "{{ harden_pwquality_file }}"
+    state: absent
+  when: not (harden_password_policy | bool)

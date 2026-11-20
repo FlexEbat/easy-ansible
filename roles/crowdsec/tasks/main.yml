@@ -96,6 +96,26 @@
     - crowdsec_bouncers.rc == 0
     - crowdsec_bouncer_api_key | length > 0
 
+# Does Docker's DOCKER-USER chain exist? (iptables backend only)
+- name: Check for the Docker firewall chain
+  ansible.builtin.command:
+    cmd: iptables -w -n -L DOCKER-USER
+  register: crowdsec_docker_chain
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - crowdsec_docker_protection | bool
+    - crowdsec_bouncer_mode == 'iptables'
+    - not (is_container | bool)
+
+- name: Decide how the bouncer protects Docker
+  ansible.builtin.set_fact:
+    crowdsec_docker_active: >-
+      {{ (crowdsec_docker_protection | bool) and not (is_container | bool)
+         and (crowdsec_bouncer_mode == 'nftables'
+              or (crowdsec_docker_chain.rc | default(1)) == 0) }}
+
 # Rewriting the override on every run keeps the backend mode converged
 # (iptables for UFW, nftables for firewalld) without losing a package-managed
 # API key.
@@ -105,11 +125,52 @@
     content: |
       mode: {{ crowdsec_bouncer_mode }}
       api_key: {{ crowdsec_bouncer_api_key }}
+      {% if crowdsec_docker_active | bool and crowdsec_bouncer_mode == 'iptables' %}
+      iptables_chains:
+        - INPUT
+        - DOCKER-USER
+      {% elif crowdsec_docker_active | bool %}
+      nftables_hooks:
+        - input
+        - forward
+      {% endif %}
     owner: root
     group: root
     mode: "0600"
   no_log: true
   when: crowdsec_bouncer_api_key | length > 0
+  notify: Restart crowdsec firewall bouncer
+
+# After a reboot the bouncer must start after Docker has created its chain.
+- name: Start the bouncer after Docker
+  when: crowdsec_docker_active | bool
+  block:
+    - name: Ensure the bouncer drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ crowdsec_bouncer_dropin | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Order the bouncer after docker.service
+      ansible.builtin.copy:
+        dest: "{{ crowdsec_bouncer_dropin }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          [Unit]
+          After=docker.service
+          Wants=docker.service
+      notify: Restart crowdsec firewall bouncer
+
+- name: Remove the bouncer ordering drop-in
+  ansible.builtin.file:
+    path: "{{ crowdsec_bouncer_dropin }}"
+    state: absent
+  when: not (crowdsec_docker_active | bool)
   notify: Restart crowdsec firewall bouncer
 
 - name: Ensure the CrowdSec firewall bouncer is enabled and running

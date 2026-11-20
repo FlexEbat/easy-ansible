@@ -1,0 +1,21 @@
+---
+- name: Write the extra sysctl hardening
+  ansible.builtin.copy:
+    dest: "{{ harden_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      {% for key, value in harden_sysctl_values.items() %}
+      {{ key }} = {{ value }}
+      {% endfor %}
+  when: harden_sysctl | bool
+  notify: Apply the extra sysctl hardening
+
+# Values already loaded stay until the next reboot.
+- name: Remove the extra sysctl hardening
+  ansible.builtin.file:
+    path: "{{ harden_sysctl_file }}"
+    state: absent
+  when: not (harden_sysctl | bool)

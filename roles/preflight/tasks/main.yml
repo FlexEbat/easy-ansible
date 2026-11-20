@@ -1,0 +1,187 @@
+---
+- name: Preflight | Assert a supported Ansible version
+  ansible.builtin.assert:
+    that:
+      - ansible_version.full is version('2.15', '>=')
+    fail_msg: "ansible-core 2.15 or newer is required (found {{ ansible_version.full }})."
+    quiet: true
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+- name: Preflight | Validate the SSH port
+  ansible.builtin.assert:
+    that:
+      - ssh_port | string is match('^[0-9]+$')
+      - ssh_port | int >= 1
+      - ssh_port | int <= 65535
+    fail_msg: "ssh_port must be a number from 1 to 65535 (got {{ ssh_port }})."
+    quiet: true
+
+- name: Preflight | Check that the admin user stays allowed to log in over SSH
+  ansible.builtin.assert:
+    that:
+      - ssh_allow_users | length == 0 or admin_user in ssh_allow_users
+    fail_msg: >-
+      ssh_allow_users is set but does not contain {{ admin_user }}; sshd would
+      refuse the admin user. Add it to ssh_allow_users.
+    quiet: true
+  when: ssh_harden | bool
+
+# ---------------------------------------------------------------------------
+# Admin account: it must be possible to log in AND to use sudo afterwards
+# ---------------------------------------------------------------------------
+- name: Preflight | Look up the admin user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ admin_user }}"
+    fail_key: false
+
+- name: Preflight | Remember whether the admin user exists and where its keys are
+  ansible.builtin.set_fact:
+    preflight_admin_exists: "{{ getent_passwd[admin_user] is not none }}"
+    preflight_admin_home: "{{ getent_passwd[admin_user][4] if getent_passwd[admin_user] is not none else '' }}"
+
+- name: Preflight | Look for existing SSH keys of the admin user
+  ansible.builtin.stat:
+    path: "{{ preflight_admin_home }}/.ssh/authorized_keys"
+  register: preflight_admin_keys
+  when: preflight_admin_exists | bool
+
+- name: Preflight | Work out the admin login and sudo situation
+  ansible.builtin.set_fact:
+    preflight_has_keys: >-
+      {{ admin_user_authorized_keys | length > 0
+         or (preflight_admin_keys.stat.exists | default(false)
+             and preflight_admin_keys.stat.size | default(0) > 0) }}
+    preflight_has_password: "{{ admin_user_password_hash | length > 0 }}"
+
+- name: Preflight | A new admin user must be able to log in
+  ansible.builtin.assert:
+    that:
+      - preflight_has_keys | bool or preflight_has_password | bool
+    fail_msg: >-
+      {{ admin_user }} does not exist and neither admin_user_authorized_keys nor
+      admin_user_password_hash is set: the account would be locked. Set one of
+      them (the wizard does this) or preflight_allow_locked_admin=true.
+    quiet: true
+  when:
+    - admin_user != 'root'
+    - not (preflight_admin_exists | bool)
+    - not (preflight_allow_locked_admin | bool)
+
+- name: Preflight | A new admin user must be able to use sudo
+  ansible.builtin.assert:
+    that:
+      - admin_user_sudo_nopasswd | bool or preflight_has_password | bool
+    fail_msg: >-
+      {{ admin_user }} will have no password, so sudo can only work without one.
+      Set admin_user_sudo_nopasswd=true (key-only account) or
+      admin_user_password_hash.
+    quiet: true
+  when:
+    - admin_user != 'root'
+    - not (preflight_admin_exists | bool)
+    - not (preflight_allow_locked_admin | bool)
+
+- name: Preflight | SSH hardening must not lock everybody out
+  ansible.builtin.assert:
+    that:
+      - ssh_password_auth | bool or preflight_has_keys | bool
+      - admin_user != 'root' or ssh_permit_root_login != 'no'
+    fail_msg: >-
+      ssh_password_auth=false needs an SSH key for {{ admin_user }}
+      (admin_user_authorized_keys or an existing authorized_keys), and root
+      login cannot be disabled while root is the admin user.
+    quiet: true
+  when: ssh_harden | bool
+
+# ---------------------------------------------------------------------------
+# Machine
+# ---------------------------------------------------------------------------
+- name: Preflight | Check that the new SSH port is free
+  ansible.builtin.command:
+    argv: [ss, -H, -ltnp, "sport = :{{ ssh_port }}"]
+  register: preflight_port_listeners
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: ssh_port | int != 22
+
+- name: Preflight | Assert that nothing but sshd listens on the SSH port
+  ansible.builtin.assert:
+    that:
+      - preflight_port_listeners.rc != 0
+        or preflight_port_listeners.stdout | trim | length == 0
+        or 'sshd' in preflight_port_listeners.stdout
+    fail_msg: >-
+      Port {{ ssh_port }}/tcp is already used by another service:
+      {{ preflight_port_listeners.stdout | default('') | trim }}.
+    quiet: true
+  when: ssh_port | int != 22
+
+- name: Preflight | Find the root filesystem
+  ansible.builtin.set_fact:
+    preflight_root_mounts: "{{ ansible_facts['mounts'] | default([]) | selectattr('mount', 'equalto', '/') | list }}"
+
+- name: Preflight | Assert enough free disk space
+  ansible.builtin.assert:
+    that:
+      - (preflight_root_mounts[0].size_available / 1048576) | int >= preflight_min_disk_mb | int
+    fail_msg: >-
+      Less than {{ preflight_min_disk_mb }} MB free on / ({{ (preflight_root_mounts[0].size_available / 1048576) | int }} MB).
+    quiet: true
+  when: preflight_root_mounts | length > 0
+
+- name: Preflight | Assert enough memory
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['memtotal_mb'] | int >= preflight_min_memory_mb | int
+    fail_msg: >-
+      Only {{ ansible_facts['memtotal_mb'] }} MB of RAM (minimum {{ preflight_min_memory_mb }} MB).
+    quiet: true
+
+- name: Preflight | Check that the Docker repository can be reached
+  ansible.builtin.uri:
+    url: >-
+      https://download.docker.com/linux/{{ 'ubuntu' if ansible_facts['distribution'] == 'Ubuntu'
+      else ('debian' if ansible_facts['os_family'] == 'Debian' else 'centos') }}/gpg
+    method: HEAD
+    status_code: 200
+    timeout: 15
+  register: preflight_network
+  retries: 3
+  delay: 3
+  until: preflight_network.status | default(0) == 200
+  changed_when: false
+  check_mode: false
+  when: preflight_check_network | bool
+
+# ---------------------------------------------------------------------------
+# Things that will be skipped, not failed
+# ---------------------------------------------------------------------------
+- name: Preflight | Warn about options that need a real host
+  ansible.builtin.debug:
+    msg: >-
+      Running inside a container: auditd and the mandatory access control
+      setup are skipped (they belong to the host kernel).
+  when:
+    - is_container | bool
+    - (harden_auditd | bool) or (harden_mac | bool)
+
+- name: Preflight | Warn about the provider firewall when the SSH port changes
+  ansible.builtin.debug:
+    msg: >-
+      ssh_port is {{ ssh_port }}: allow {{ ssh_port }}/tcp in your hosting
+      provider's firewall / security group too, and keep this session open
+      until you have logged in on the new port.
+  when: ssh_port | int != 22
+
+- name: Preflight | Stop after the checks when only a pre-flight run was asked for
+  ansible.builtin.debug:
+    msg: "All pre-flight checks passed. Nothing was changed."
+  when: preflight_only | bool
+
+- name: Preflight | End the play
+  ansible.builtin.meta: end_play
+  when: preflight_only | bool

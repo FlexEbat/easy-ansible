@@ -422,7 +422,8 @@ firewall открывает `22/tcp` (UFW — с `limit`: не более 6 но
 Опционально (`-e ssh_harden=true`) роль `ssh` пишет drop-in
 `/etc/ssh/sshd_config.d/00-ansible-hardening.conf` (читается первым, поэтому
 перекрывает, например, файлы cloud-init): `PermitRootLogin`, `PubkeyAuthentication`,
-`PasswordAuthentication`, `MaxAuthTries`, `X11Forwarding`. Порт SSH не меняется.
+`PasswordAuthentication`, `MaxAuthTries`, `X11Forwarding`. Порт можно сменить
+(`ssh_port`, см. «Расширенная настройка SSH»).
 Конфигурация проверяется `sshd -t`, применяется через `reload`
 (текущие сессии не разрываются). Для отключения паролей:
 
@@ -527,6 +528,141 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
   `visudo -cf`. При `false` (по умолчанию) этот файл удаляется.
 - Для `admin_user=root` членство в группе не требуется.
 
+## Предполётные проверки (preflight)
+
+Перед любыми изменениями роль `preflight` проверяет всё, что может оставить
+вас без доступа или оборвать запуск на полпути. Любая неудача **сразу
+останавливает весь запуск** (`any_errors_fatal`), система остаётся нетронутой:
+
+- версия ansible-core (2.15+), корректность `ssh_port`;
+- новый администратор может войти (ключ или пароль) и пользоваться `sudo`
+  (ключ без пароля требует `admin_user_sudo_nopasswd: true`);
+- отключение паролей SSH возможно только при наличии ключа у администратора;
+  `ssh_allow_users` обязан содержать администратора;
+- новый порт SSH не занят другой службой;
+- свободное место (`preflight_min_disk_mb`, 1024 МБ) и память
+  (`preflight_min_memory_mb`, 400 МБ);
+- доступен репозиторий Docker по HTTPS (`preflight_check_network: false`
+  отключает проверку).
+
+Только проверки, без изменений: `./run.sh --preflight`.
+
+## Теги
+
+Запуск части плейбука: `./run.sh --tags ssh,firewall` (или
+`ansible-playbook site.yml --tags ...`). Предполётные проверки, учётка
+администратора и итоговая сводка выполняются всегда.
+
+| Тег | Что выполняется |
+|---|---|
+| `base`, `ssh`, `firewall`, `kernel`, `docker`, `crowdsec` | одноимённые роли |
+| `docker_prune` | очистка Docker |
+| `hardening` | вся дополнительная защита |
+| `sysctl`, `sudo`, `pwquality`, `coredump`, `modules`, `banner`, `cron`, `mac`, `auditd`, `lynis`, `logrotate` | отдельные пункты защиты |
+
+## Расширенная настройка SSH
+
+| Переменная | Что делает |
+|---|---|
+| `ssh_port` | порт SSH. Правило firewall для него создаётся автоматически (UFW `limit`/`allow` или firewalld), на RHEL ставится метка SELinux `ssh_port_t`, на Ubuntu 24.04 переопределяется `ssh.socket`. Правило для порта 22 остаётся, пока не включён `firewall_close_old_ssh_port: true`; тогда плейбук сначала проверяет, что sshd слушает новый порт |
+| `ssh_harden` + `ssh_password_auth: false` | запрет входа по паролю и root |
+| `ssh_harden_extra` | `LoginGraceTime 30`, `ClientAliveInterval 300`, `ClientAliveCountMax 2`, `MaxSessions 10`, запрет agent forwarding. **TCP-forwarding остаётся разрешённым**, поэтому `ssh -L/-D`, `ProxyJump` и SSH-туннели работают |
+| `ssh_allow_users`, `ssh_allow_groups` | кто может входить |
+| `ssh_modern_crypto` | только современные KEX/шифры/MAC |
+| `harden_banner` | баннер до входа |
+
+Перед сменой порта откройте его и в firewall хостера и не закрывайте текущую
+сессию, пока не войдёте по новому порту.
+
+## Дополнительная защита (всё выключено по умолчанию)
+
+Включается по пунктам в `vars.local.yml` (мастер спрашивает про каждый) и
+отключается обратно: выставьте `false` и запустите плейбук снова.
+
+- **`harden_sysctl`** — `kernel.kptr_restrict=2`, `kernel.yama.ptrace_scope=1`,
+  `kernel.unprivileged_bpf_disabled=1`, `net.core.bpf_jit_harden=2`,
+  `fs.protected_*`, `tcp_rfc1337`. Не трогает `ip_forward` и `rp_filter`
+  (нужны VPN, прокси и Docker). Побочный эффект: `ptrace_scope=1` не даёт
+  обычному пользователю подключаться отладчиком к чужим процессам.
+- **`harden_sudo`** — файл `/etc/sudoers.d/91-ansible-hardening`:
+  - `use_pty`: команда выполняется в собственном псевдотерминале, поэтому
+    фоновый процесс не может после завершения `sudo` писать в ваш терминал или
+    подсовывать в него нажатия клавиш;
+  - `logfile="/var/log/sudo.log"` (+ `log_host, log_year`): каждая команда
+    пишется в отдельный файл, помимо журнала системы; ротация настраивается
+    автоматически;
+  - `timestamp_timeout=5`: после ввода пароля `sudo` не спрашивает его ещё
+    5 минут (в дистрибутивах по умолчанию 15). Файл проверяется `visudo -cf`.
+- **`harden_password_policy`** — `libpwquality`: минимум 12 символов, минимум
+  3 класса (строчные, прописные, цифры, спецсимволы), не более 3 одинаковых
+  подряд, проверка по словарю и на совпадение с логином. Действует только при
+  смене пароля (`passwd`) и не затрагивает вход по ключу и уже заданные
+  пароли; root политикой не ограничен. Значения: `harden_pwquality_*`.
+- **`harden_coredumps`** — `* hard core 0` в `limits.d`, `Storage=none` для
+  systemd-coredump, `kernel.core_pattern=|/bin/false`, `fs.suid_dumpable=0`.
+- **`harden_kernel_modules`** — `install <модуль> /bin/false` для `dccp`, `sctp`,
+  `rds`, `tipc`, `cramfs`, `freevxfs`, `hfs`, `hfsplus`, `jffs2`. В списке нет
+  ничего, что используют WireGuard/OpenVPN/прокси (`tun`, `wireguard`) или Docker
+  (`overlay`, `veth`, `br_netfilter`); `verify.sh` это проверяет. Уберите `sctp`,
+  если пользуетесь SCTP; `usb-storage` добавляется через
+  `harden_blacklist_modules_extra`. Уже загруженные модули остаются до перезагрузки.
+- **`harden_banner`** — текст `harden_banner_text` до входа по SSH и в `/etc/motd`
+  (копия прежнего motd сохраняется как `/etc/motd.<дата>~`).
+- **`harden_cron_at`** — `/etc/cron.allow` и `/etc/at.allow`: root, администратор
+  и `harden_cron_allow_users`. Системные задания в `/etc/cron.d` не затрагиваются,
+  а `crontab -e` у остальных пользователей перестанет работать.
+- **`harden_mac`** — Debian/Ubuntu: пакеты AppArmor обновляются до последних,
+  параметры `apparmor=1 security=apparmor` добавляются в GRUB, служба включена,
+  профили в режиме complain выводятся предупреждением. RHEL: пакеты SELinux
+  обновляются, режим `harden_selinux_mode` (по умолчанию `enforcing`). Если
+  SELinux был выключен, он сначала переводится в `permissive` с полной
+  переразметкой при следующей загрузке; после перезагрузки запустите плейбук ещё раз.
+  В контейнерах пропускается.
+- **`harden_auditd`** — пакет, служба и правила: `passwd`/`group`/`shadow`/sudoers/
+  sshd_config и команды, выполненные от root вошедшим пользователем. В контейнерах
+  пропускается. Правила неизменяемыми (`-e 2`) не делаются.
+- **`harden_lynis`** — ставит Lynis (`sudo lynis audit system`); Debian/Ubuntu.
+- **`logrotate_enabled`** (включён) — пакет и таймер logrotate, ротация
+  `/var/log/sudo.log` и файлов из `logrotate_extra_logs`. Docker, CrowdSec, UFW,
+  auditd и journald ротируют свои логи сами.
+- **`docker_prune_enabled`** — таймер systemd раз в неделю выполняет
+  `docker system prune --force --filter until=168h`: удаляет остановленные
+  контейнеры, неиспользуемые сети, образы без тегов и кэш сборки старше недели.
+  Тома не трогаются (только при `docker_prune_volumes: true`; это удаляет данные).
+  `docker compose stop` старше недели тоже будет вычищен — тома при этом сохранятся.
+
+### CrowdSec вместо правил UFW для Docker
+
+Правила UFW для опубликованных портов Docker не добавляются. Вместо этого
+(`crowdsec_docker_protection`, включено) bouncer CrowdSec фильтрует и цепочку
+`DOCKER-USER` (iptables), и хук forward (nftables): забаненные адреса не
+доберутся и до портов контейнеров. Роль `crowdsec` запускается после `docker`,
+а systemd-drop-in запускает bouncer после `docker.service`. Рекомендация
+`docker_default_bind_ip: 127.0.0.1` остаётся в силе: CrowdSec банит только
+замеченных атакующих, а не закрывает порты.
+
+## Откат изменений
+
+Основной способ: **вернуть переменную в `false` (или удалить) и запустить
+плейбук снова** — созданные файлы будут удалены. Часть эффектов видна только
+после перезагрузки (уже применённые sysctl, загруженные модули).
+
+| Что откатить | Как |
+|---|---|
+| Любой пункт защиты | `harden_<имя>: false`, `./run.sh --tags <тег>` |
+| Порт SSH | `ssh_port: 22`, запуск; удалите лишнее правило: `sudo ufw delete allow 2222/tcp` (UFW) или `sudo firewall-cmd --permanent --remove-port=2222/tcp && sudo firewall-cmd --reload` |
+| SSH целиком | `sudo rm /etc/ssh/sshd_config.d/00-ansible-hardening.conf && sudo systemctl reload ssh` (`sshd` на RHEL); копии изменённых файлов: `/etc/ssh/*.<дата>~` |
+| ssh.socket (Ubuntu 24.04) | `sudo rm /etc/systemd/system/ssh.socket.d/ansible-port.conf && sudo systemctl daemon-reload && sudo systemctl restart ssh.socket` |
+| sudo | `sudo rm /etc/sudoers.d/91-ansible-hardening` (при потере доступа к sudo: `su -` и то же самое) |
+| Баннер | `harden_banner: false`; прежний motd — `/etc/motd.<дата>~` |
+| AppArmor в GRUB | `harden_mac: false` (удаляет `/etc/default/grub.d/99-ansible-apparmor.cfg` и обновляет GRUB), перезагрузка |
+| SELinux | `sudo setenforce 0` (до перезагрузки) или `SELINUX=permissive` в `/etc/selinux/config`; `/.autorelabel` удаляется вручную |
+| auditd | `harden_auditd: false`; пакет: `sudo apt purge auditd` / `sudo dnf remove audit` |
+| Модули ядра | `harden_kernel_modules: false`, перезагрузка |
+| Очистка Docker | `docker_prune_enabled: false` |
+| CrowdSec для Docker | `crowdsec_docker_protection: false`, запуск (bouncer вернётся к `INPUT`) |
+| Потерян доступ по SSH | консоль хостера → удалите drop-in SSH (строка выше), проверьте `sudo ss -ltnp`, правила firewall и firewall хостера |
+
 ## Если что-то пошло не так
 
 | Симптом | Что делать |
@@ -554,7 +690,11 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 ├── wizard.sh                  # мастер вопросов, создаёт vars.local.yml
 ├── vars.example.yml           # справочник по всем настройкам
 ├── verify.sh
+├── ci/                        # настройки для проверки идемпотентности в CI
+├── .github/workflows/idempotency.yml
 └── roles/                     # у каждой роли свои defaults/main.yml
+    ├── preflight/     # проверки до начала изменений (любая ошибка — стоп)
+    ├── hardening/     # необязательная защита: sudo, pwquality, auditd, AppArmor/SELinux, ...
     ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
     ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
     ├── ssh/           # опциональная настройка sshd (ssh_harden, по умолчанию выключена)
@@ -566,6 +706,9 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 
 ## Безопасность и ограничения
 
+- Проверка идемпотентности: `.github/workflows/idempotency.yml` дважды запускает
+  плейбук на чистом раннере (профили `default` и `hardened` из `ci/`); второй
+  запуск должен дать `changed=0`.
 - SSH по умолчанию остаётся в конфигурации дистрибутива: порт 22, вход по
   паролю включён (UFW ограничивает частоту подключений, CrowdSec банит
   перебор). Для продакшена включите `ssh_harden` с `ssh_password_auth=false`

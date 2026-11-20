@@ -3,6 +3,8 @@
   hosts: all
   become: true
   gather_facts: true
+  # Any failure (pre-flight check or task) stops the whole run at once.
+  any_errors_fatal: true
 
   pre_tasks:
     - name: Assert that the operating system is supported
@@ -24,6 +26,7 @@
         success_msg: >-
           Supported operating system: {{ ansible_facts['distribution'] }}
           {{ ansible_facts['distribution_version'] }}.
+      tags: [always]
 
     - name: Assert that an admin user is defined
       ansible.builtin.assert:
@@ -32,6 +35,7 @@
           - admin_user | length > 0
         fail_msg: >-
           admin_user resolved to an empty value. Pass -e admin_user=<name>.
+      tags: [always]
 
     - name: Assert that extra firewall ports have a port number and a valid protocol
       ansible.builtin.assert:
@@ -44,31 +48,56 @@
       loop: "{{ firewall_allowed_ports }}"
 
     # "80/tcp", "443/udp", ...: used by the summary and by verify.sh.
+      tags: [always]
+
     - name: Normalise the extra firewall ports
       ansible.builtin.set_fact:
         firewall_allowed_specs: >-
           {{ firewall_allowed_ports | map(attribute='port')
              | zip(firewall_allowed_ports | map(attribute='proto', default='tcp'))
              | map('join', '/') | list }}
+      tags: [always]
 
     - name: Initialize the reboot-required flag
       ansible.builtin.set_fact:
         reboot_required: false
 
+    # Checks everything that could lock you out or fail half-way, before any
+    # change is made. ./run.sh --preflight stops right after it.
+      tags: [always]
+
+    - name: Run the pre-flight checks
+      ansible.builtin.import_role:
+        name: preflight
+      tags: [always]
+
+  # Tags: ansible-playbook site.yml --tags ssh,firewall (preflight and the
+  # admin account always run). hardening has sub-tags, see its defaults.
   roles:
-    - base
-    - admin_user
-    - ssh
-    - firewall
-    - crowdsec
-    - kernel
-    - docker
+    - {role: base, tags: [base]}
+    - {role: admin_user, tags: [users, always]}
+    - {role: hardening, tags: [hardening]}
+    - {role: ssh, tags: [ssh]}
+    - {role: firewall, tags: [firewall]}
+    - {role: kernel, tags: [kernel]}
+    - {role: docker, tags: [docker]}
+    # After docker: the bouncer also filters Docker's published ports.
+    - {role: crowdsec, tags: [crowdsec]}
 
   post_tasks:
     # Make sure any queued handlers (for example the Docker restart) happen
     # before the final summary/verification.
     - name: Apply queued handlers
       ansible.builtin.meta: flush_handlers
+
+    # sshd has been reloaded by now: prove that it listens on the new port and,
+    # if asked, close the old port-22 rule.
+    - name: Verify the SSH port and clean up the old firewall rule
+      ansible.builtin.include_role:
+        name: firewall
+        tasks_from: ssh_port_cleanup
+      when: ssh_port | int != 22
+      tags: [ssh, firewall]
 
     - name: Write setup summary
       ansible.builtin.copy:
@@ -85,7 +114,10 @@
             'admin_home': admin_home,
             'sudo_group': sudo_group,
             'admin_user_sudo_nopasswd': admin_user_sudo_nopasswd | bool,
+            'ssh_port': ssh_port | int,
             'ssh_harden': ssh_harden | bool,
+            'ssh_harden_extra': ssh_harden_extra | bool,
+            'ssh_modern_crypto': ssh_modern_crypto | bool,
             'ssh_password_auth': ssh_password_auth | bool,
             'ssh_permit_root_login': ssh_permit_root_login,
             'firewall_backend': firewall_backend,
@@ -105,21 +137,43 @@
             'docker_daemon_config': docker_daemon_config,
             'docker_add_admin_to_group': docker_add_admin_to_group | bool,
             'docker_default_bind_ip': docker_default_bind_ip,
+            'docker_prune_enabled': docker_prune_enabled | bool,
+            'crowdsec_docker_protection': crowdsec_docker_protection | bool,
+            'crowdsec_docker_active': crowdsec_docker_active | default(false) | bool,
+            'harden_sysctl': harden_sysctl | bool,
+            'harden_sysctl_keys': harden_sysctl_values.keys() | list,
+            'harden_sudo': harden_sudo | bool,
+            'harden_sudo_file': harden_sudo_file,
+            'harden_password_policy': harden_password_policy | bool,
+            'harden_coredumps': harden_coredumps | bool,
+            'harden_kernel_modules': harden_kernel_modules | bool,
+            'harden_blacklist_modules': (harden_blacklist_modules + harden_blacklist_modules_extra) | unique | list,
+            'harden_banner': harden_banner | bool,
+            'harden_banner_file': harden_banner_file,
+            'harden_cron_at': harden_cron_at | bool,
+            'harden_mac': harden_mac | bool,
+            'harden_auditd': harden_auditd | bool,
+            'harden_lynis': harden_lynis | bool,
+            'logrotate_enabled': logrotate_enabled | bool,
             'reboot_required': reboot_required | bool
           } | to_nice_json }}
+      tags: [always]
 
     - name: Show setup summary
       ansible.builtin.debug:
         msg:
           - "OS:               {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
           - "Admin user:       {{ admin_user }} (sudo group: {{ sudo_group }}, NOPASSWD: {{ admin_user_sudo_nopasswd }})"
-          - "SSH hardening:    {{ ssh_harden }} (password login: {{ ssh_password_auth }})"
+          - "SSH:              port {{ ssh_port }}, hardening {{ ssh_harden }} (password login: {{ ssh_password_auth }})"
           - "Firewall:         {{ firewall_backend }}"
           - "Extra open ports: {{ firewall_allowed_specs | join(', ') if firewall_allowed_specs | length > 0 else 'none' }}"
           - "Auto updates:     {{ auto_updates_enabled }} (auto reboot: {{ auto_reboot }})"
           - "IPv6 disabled:    {{ disable_ipv6 }}"
+          - "Docker cleanup:   {{ docker_prune_enabled }} (CrowdSec covers Docker: {{ crowdsec_docker_active | default(false) }})"
+          - "Hardening:        sysctl={{ harden_sysctl }} sudo={{ harden_sudo }} pwquality={{ harden_password_policy }} coredump={{ harden_coredumps }} modules={{ harden_kernel_modules }} banner={{ harden_banner }} cron={{ harden_cron_at }} mac={{ harden_mac }} auditd={{ harden_auditd }} lynis={{ harden_lynis }}"
           - "Reboot required:  {{ reboot_required }}"
           - "Summary file:     /etc/ansible-setup-summary.json"
+      tags: [always]
 
     - name: Warn when the host needs a reboot
       ansible.builtin.debug:
@@ -127,3 +181,4 @@
           A reboot is required to finish applying updates (kernel or core
           libraries were upgraded). Reboot at a convenient time.
       when: reboot_required | bool
+      tags: [always]

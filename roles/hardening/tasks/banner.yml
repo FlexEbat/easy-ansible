@@ -1,0 +1,23 @@
+---
+- name: Write the pre-login banner and the message of the day
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ harden_banner_text }}"
+    backup: "{{ item == '/etc/motd' }}"
+  loop:
+    - "{{ harden_banner_file }}"
+    - /etc/motd
+  when: harden_banner | bool
+
+# /etc/motd is removed too; a copy of the original is kept as /etc/motd.<date>~.
+- name: Remove the banner and the message of the day
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ harden_banner_file }}"
+    - /etc/motd
+  when: not (harden_banner | bool)

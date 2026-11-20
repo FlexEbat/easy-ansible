@@ -1,0 +1,23 @@
+---
+# Everything optional switched on. Password login stays allowed and the SSH
+# port is changed to 2222 (the runner is reached outbound, so it keeps working).
+admin_user: runner
+admin_user_sudo_nopasswd: true
+base_install_trippy: false
+ssh_port: 2222
+ssh_harden: true
+ssh_password_auth: true
+ssh_permit_root_login: prohibit-password
+ssh_harden_extra: true
+ssh_modern_crypto: true
+harden_sysctl: true
+harden_sudo: true
+harden_password_policy: true
+harden_coredumps: true
+harden_kernel_modules: true
+harden_banner: true
+harden_cron_at: true
+harden_mac: true
+harden_auditd: true
+harden_lynis: true
+docker_prune_enabled: true

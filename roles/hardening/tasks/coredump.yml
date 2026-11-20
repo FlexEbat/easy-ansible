@@ -1,0 +1,56 @@
+---
+- name: Disable core dumps
+  when: harden_coredumps | bool
+  block:
+    - name: Limit core dump size to zero for all sessions
+      ansible.builtin.copy:
+        dest: "{{ harden_coredump_limits_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          *    hard core 0
+          root hard core 0
+
+    - name: Ensure the systemd-coredump drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ harden_coredump_systemd_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Stop systemd-coredump from storing dumps
+      ansible.builtin.copy:
+        dest: "{{ harden_coredump_systemd_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          [Coredump]
+          Storage=none
+          ProcessSizeMax=0
+
+    - name: Disable core dumps in the kernel
+      ansible.builtin.copy:
+        dest: "{{ harden_coredump_sysctl_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          fs.suid_dumpable = 0
+          kernel.core_pattern = |/bin/false
+      notify: Apply the core dump sysctl
+
+- name: Remove the core dump restrictions
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ harden_coredump_limits_file }}"
+    - "{{ harden_coredump_systemd_file }}"
+    - "{{ harden_coredump_sysctl_file }}"
+  when: not (harden_coredumps | bool)

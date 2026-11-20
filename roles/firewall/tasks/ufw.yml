@@ -19,14 +19,14 @@
     logging: "{{ ufw_logging }}"
 
 # ---------------------------------------------------------------------------
-# SSH stays on its default port. UFW denies all incoming traffic by default,
-# so an explicit rule for SSH is required. "limit" allows it but throttles
-# repeated connection attempts from one address.
+# SSH. UFW denies all incoming traffic by default, so an explicit rule for the
+# SSH port ({{ ssh_port }}) is required; it follows ssh_port automatically.
+# "limit" allows it but throttles repeated connection attempts from one address.
 # ---------------------------------------------------------------------------
-- name: Allow SSH on the default port
+- name: Allow SSH on the configured port
   community.general.ufw:
     rule: "{{ 'limit' if firewall_ssh_rate_limit | bool else 'allow' }}"
-    port: "22"
+    port: "{{ ssh_port }}"
     proto: tcp
     comment: "SSH"
 
@@ -34,7 +34,7 @@
 - name: Remove the opposite SSH rule so that only one remains
   community.general.ufw:
     rule: "{{ 'allow' if firewall_ssh_rate_limit | bool else 'limit' }}"
-    port: "22"
+    port: "{{ ssh_port }}"
     proto: tcp
     delete: true
 

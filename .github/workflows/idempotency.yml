@@ -1,0 +1,53 @@
+name: idempotency
+
+# Runs the playbook twice on a clean GitHub runner. The second run must change
+# nothing (changed=0, failed=0) - that is what "idempotent" means.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: |
+          python3 -m venv ~/venv
+          ~/venv/bin/pip install ansible
+      - name: Syntax check
+        run: ~/venv/bin/ansible-playbook -i localhost, -c local site.yml --syntax-check
+      - name: Pre-flight checks only
+        run: >-
+          sudo -E ~/venv/bin/ansible-playbook -i localhost, -c local site.yml
+          -e @ci/vars-hardened.yml -e preflight_only=true
+
+  idempotency:
+    needs: syntax
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, hardened]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: |
+          python3 -m venv ~/venv
+          ~/venv/bin/pip install ansible
+      - name: First run
+        run: |
+          sudo -E ~/venv/bin/ansible-playbook -i localhost, -c local site.yml \
+            -e @ci/vars-${{ matrix.profile }}.yml
+      - name: Second run (must not change anything)
+        run: |
+          sudo -E ~/venv/bin/ansible-playbook -i localhost, -c local site.yml \
+            -e @ci/vars-${{ matrix.profile }}.yml | tee second-run.log
+          if ! grep -Eq 'changed=0[[:space:]]+unreachable=0[[:space:]]+failed=0' second-run.log; then
+            echo "::error::the second run changed something, so the playbook is not idempotent"
+            grep -B3 -E '^changed:' second-run.log || true
+            exit 1
+          fi
+      - name: Verify
+        run: sudo ./verify.sh

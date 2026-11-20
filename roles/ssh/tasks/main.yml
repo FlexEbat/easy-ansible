@@ -1,13 +1,21 @@
 ---
-- name: Remove the hardening drop-in when SSH hardening is disabled
+# The drop-in is needed when anything it carries is switched on.
+- name: Decide whether the sshd drop-in is needed
+  ansible.builtin.set_fact:
+    ssh_manage_dropin: >-
+      {{ (ssh_harden | bool) or (ssh_harden_extra | bool) or (ssh_modern_crypto | bool)
+         or (ssh_port | int != 22) or (ssh_banner_file | length > 0)
+         or (ssh_allow_users | length > 0) or (ssh_allow_groups | length > 0) }}
+
+- name: Remove the sshd drop-in when nothing needs it
   ansible.builtin.file:
     path: "{{ ssh_dropin_file }}"
     state: absent
-  when: not (ssh_harden | bool)
+  when: not (ssh_manage_dropin | bool)
   notify: Reload ssh
 
-- name: Harden sshd
-  when: ssh_harden | bool
+- name: Configure sshd
+  when: ssh_manage_dropin | bool
   block:
     - name: Look for SSH keys of the admin user
       ansible.builtin.stat:
@@ -26,6 +34,7 @@
           disabled while {{ admin_user }} has no SSH key in
           {{ admin_home }}/.ssh/authorized_keys (or root login is disabled
           while root is the admin user). Set admin_user_authorized_keys first.
+      when: ssh_harden | bool
 
     - name: Ensure the sshd drop-in directory exists
       ansible.builtin.file:
@@ -44,6 +53,18 @@
         regexp: '^Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$'
         insertbefore: BOF
         state: present
+        backup: true
+      notify: Reload ssh
+
+    # "Port" is cumulative: an explicit "Port 22" in the main file would keep
+    # sshd listening on 22 next to the new port.
+    - name: Comment out an explicit Port line in sshd_config
+      ansible.builtin.replace:
+        path: /etc/ssh/sshd_config
+        regexp: '^(\s*Port\s+.*)$'
+        replace: '# Disabled by Ansible (the port is set in sshd_config.d): \1'
+        backup: true
+      when: ssh_port | int != 22
       notify: Reload ssh
 
     # "sshd -t" needs the privilege separation directory on Debian.
@@ -55,15 +76,20 @@
         group: root
         mode: "0755"
 
-    - name: Write the sshd hardening drop-in
+    - name: Write the sshd drop-in
       ansible.builtin.copy:
         dest: "{{ ssh_dropin_file }}"
         owner: root
         group: root
         mode: "0644"
+        backup: true
         validate: "/usr/sbin/sshd -t -f %s"
         content: |
           # Managed by Ansible
+          {% if ssh_port | int != 22 %}
+          Port {{ ssh_port }}
+          {% endif %}
+          {% if ssh_harden | bool %}
           PermitRootLogin {{ ssh_permit_root_login }}
           PubkeyAuthentication yes
           PasswordAuthentication {{ 'yes' if ssh_password_auth | bool else 'no' }}
@@ -72,4 +98,77 @@
           {% endif %}
           MaxAuthTries {{ ssh_max_auth_tries }}
           X11Forwarding {{ 'yes' if ssh_x11_forwarding | bool else 'no' }}
+          {% endif %}
+          {% if ssh_harden_extra | bool %}
+          LoginGraceTime {{ ssh_login_grace_time }}
+          ClientAliveInterval {{ ssh_client_alive_interval }}
+          ClientAliveCountMax {{ ssh_client_alive_count_max }}
+          MaxSessions {{ ssh_max_sessions }}
+          AllowTcpForwarding {{ 'yes' if ssh_allow_tcp_forwarding | bool else 'no' }}
+          AllowAgentForwarding {{ 'yes' if ssh_allow_agent_forwarding | bool else 'no' }}
+          {% endif %}
+          {% if ssh_allow_users | length > 0 %}
+          AllowUsers {{ ssh_allow_users | join(' ') }}
+          {% endif %}
+          {% if ssh_allow_groups | length > 0 %}
+          AllowGroups {{ ssh_allow_groups | join(' ') }}
+          {% endif %}
+          {% if ssh_modern_crypto | bool %}
+          KexAlgorithms {{ ssh_kex_algorithms }}
+          Ciphers {{ ssh_ciphers }}
+          MACs {{ ssh_macs }}
+          {% endif %}
+          {% if ssh_banner_file | length > 0 %}
+          Banner {{ ssh_banner_file }}
+          {% endif %}
       notify: Reload ssh
+
+# ---------------------------------------------------------------------------
+# Socket-activated sshd (Ubuntu 24.04+)
+# ---------------------------------------------------------------------------
+- name: Check whether sshd is started through ssh.socket
+  ansible.builtin.command:
+    cmd: systemctl is-active ssh.socket
+  register: ssh_socket_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not (is_container | bool)
+
+- name: Point ssh.socket at the configured port
+  ansible.builtin.copy:
+    dest: "{{ ssh_socket_dropin }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      [Socket]
+      ListenStream=
+      ListenStream=0.0.0.0:{{ ssh_port }}
+      ListenStream=[::]:{{ ssh_port }}
+  when:
+    - ssh_socket_state.stdout | default('') | trim == 'active'
+    - ssh_port | int != 22
+  register: ssh_socket_dropin_written
+  notify: Apply the ssh socket port
+
+- name: Remove the ssh.socket port override when the port is 22 again
+  ansible.builtin.file:
+    path: "{{ ssh_socket_dropin }}"
+    state: absent
+  when: ssh_port | int == 22
+  register: ssh_socket_dropin_removed
+  notify: Apply the ssh socket port
+
+# SELinux: sshd may only bind ports labelled ssh_port_t.
+- name: Label the SSH port for SELinux
+  community.general.seport:
+    ports: "{{ ssh_port }}"
+    proto: tcp
+    setype: ssh_port_t
+    state: present
+  when:
+    - is_rhel | bool
+    - ssh_port | int != 22
+    - ansible_facts['selinux']['status'] | default('disabled') == 'enabled'

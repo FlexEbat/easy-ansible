@@ -13,6 +13,8 @@
 #   ./run.sh --wizard-only   # only create vars.local.yml (e.g. for a remote run), no root needed
 #   ./run.sh --no-wizard     # never ask; use vars.local.yml if present, defaults otherwise
 #   ./run.sh --harden-ssh    # key-only SSH, no root login (check key login first!)
+#   ./run.sh --preflight     # only run the pre-flight checks, change nothing
+#   ./run.sh --tags ssh,firewall   # run only some parts (see README, "Теги")
 #   ./run.sh --check         # any other option goes to ansible-playbook (dry run)
 #   ./run.sh -e admin_user=alice
 #
@@ -28,6 +30,7 @@ export VARS_FILE
 
 WIZARD="auto"
 HARDEN_SSH=0
+PREFLIGHT=0
 ARGS=()
 for arg in "$@"; do
   case "$arg" in
@@ -35,6 +38,7 @@ for arg in "$@"; do
     --wizard-only) WIZARD="only" ;;
     --no-wizard) WIZARD="never" ;;
     --harden-ssh) HARDEN_SSH=1 ;;
+    --preflight) PREFLIGHT=1 ;;
     *) ARGS+=("$arg") ;;
   esac
 done
@@ -104,6 +108,10 @@ if [ -f "$VARS_FILE" ]; then
 fi
 if [ "$HARDEN_SSH" -eq 1 ]; then
   EXTRA+=(-e ssh_harden=true -e ssh_password_auth=false -e ssh_permit_root_login=no)
+fi
+
+if [ "$PREFLIGHT" -eq 1 ]; then
+  EXTRA+=(-e preflight_only=true)
 fi
 
 exec ansible-playbook -i inventory.ini site.yml "${EXTRA[@]}" "${ARGS[@]}"

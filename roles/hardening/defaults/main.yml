@@ -1,0 +1,128 @@
+---
+# Optional system hardening. EVERYTHING here is OFF by default; switch on only
+# what you want (the wizard asks one by one). Setting a flag back to false and
+# running the playbook again removes what it created (see "Откат" in the README).
+# Each block has its own tag: ansible-playbook site.yml --tags sudo,auditd
+
+# ---------------------------------------------------------------------------
+# Extra kernel/network sysctls (tag: sysctl). None of them touches ip_forward,
+# rp_filter or anything else a VPN, a proxy or Docker relies on.
+# ---------------------------------------------------------------------------
+harden_sysctl: false
+harden_sysctl_file: /etc/sysctl.d/99-ansible-hardening-extra.conf
+harden_sysctl_values:
+  kernel.kptr_restrict: 2
+  kernel.yama.ptrace_scope: 1
+  kernel.unprivileged_bpf_disabled: 1
+  net.core.bpf_jit_harden: 2
+  fs.protected_fifos: 1
+  fs.protected_regular: 1
+  fs.protected_hardlinks: 1
+  fs.protected_symlinks: 1
+  net.ipv4.tcp_rfc1337: 1
+  net.ipv4.icmp_ignore_bogus_error_responses: 1
+
+# ---------------------------------------------------------------------------
+# sudo (tag: sudo): drop-in /etc/sudoers.d/91-ansible-hardening
+#   use_pty            - commands run in their own pseudo-terminal, so a
+#                        background process cannot keep writing to / injecting
+#                        keystrokes into your terminal after sudo returns
+#   logfile            - every sudo command is also written to a separate file
+#   timestamp_timeout  - minutes during which sudo does not ask for the
+#                        password again
+# ---------------------------------------------------------------------------
+harden_sudo: false
+harden_sudo_file: /etc/sudoers.d/91-ansible-hardening
+harden_sudo_logfile: /var/log/sudo.log
+harden_sudo_timestamp_timeout: 5
+
+# ---------------------------------------------------------------------------
+# Password policy (tag: pwquality): libpwquality. It only checks passwords that
+# are SET or CHANGED (passwd, chpasswd through PAM); key-only logins and
+# existing passwords are not affected. root is not bound by it.
+# ---------------------------------------------------------------------------
+harden_password_policy: false
+harden_pwquality_file: /etc/security/pwquality.conf.d/99-ansible.conf
+harden_pwquality_minlen: 12
+harden_pwquality_minclass: 3
+harden_pwquality_maxrepeat: 3
+
+# ---------------------------------------------------------------------------
+# No core dumps (tag: coredump): limits.d, systemd-coredump and the kernel
+# core_pattern. The sysctl part applies at once, the rest for new sessions.
+# ---------------------------------------------------------------------------
+harden_coredumps: false
+harden_coredump_limits_file: /etc/security/limits.d/99-ansible-nocore.conf
+harden_coredump_systemd_file: /etc/systemd/coredump.conf.d/99-ansible.conf
+harden_coredump_sysctl_file: /etc/sysctl.d/99-ansible-coredump.conf
+
+# ---------------------------------------------------------------------------
+# Kernel modules that are almost never needed and have a poor security record
+# (tag: modules). The default list does not contain anything a VPN, a proxy or
+# Docker uses. Remove sctp from the list if you run SCTP software; add
+# usb-storage to harden_blacklist_modules_extra to block USB drives.
+# ---------------------------------------------------------------------------
+harden_kernel_modules: false
+harden_blacklist_file: /etc/modprobe.d/99-ansible-blacklist.conf
+harden_blacklist_modules:
+  - dccp
+  - sctp
+  - rds
+  - tipc
+  - cramfs
+  - freevxfs
+  - hfs
+  - hfsplus
+  - jffs2
+harden_blacklist_modules_extra: []
+
+# ---------------------------------------------------------------------------
+# Login banner (tag: banner): shown before the SSH login and in /etc/motd.
+# ---------------------------------------------------------------------------
+harden_banner: false
+harden_banner_file: /etc/ssh/ansible-banner.txt
+harden_banner_text: |
+  *****************************************************************
+    RESTRICTED SYSTEM. You have accessed a secure server.
+    If you are not authorized to be here, disconnect now.
+    Your connection details have been recorded and all activity
+    is being logged.
+  *****************************************************************
+
+# ---------------------------------------------------------------------------
+# cron / at (tag: cron): only root, the admin user and the users below may use
+# crontab and at (system cron jobs in /etc/cron.d are not affected).
+# ---------------------------------------------------------------------------
+harden_cron_at: false
+harden_cron_allow_users: []
+
+# ---------------------------------------------------------------------------
+# Mandatory access control (tag: mac). Debian/Ubuntu: AppArmor installed,
+# updated, enabled in the kernel command line and the service running.
+# RHEL family: SELinux packages updated and the mode set to
+# harden_selinux_mode. A host with SELinux disabled is first set to
+# permissive and relabelled on the next boot; run the playbook again after
+# that reboot to reach enforcing.
+# ---------------------------------------------------------------------------
+harden_mac: false
+harden_selinux_mode: enforcing
+harden_apparmor_grub_dropin: /etc/default/grub.d/99-ansible-apparmor.cfg
+
+# ---------------------------------------------------------------------------
+# auditd (tag: auditd) and Lynis (tag: lynis)
+# ---------------------------------------------------------------------------
+harden_auditd: false
+harden_auditd_rules_file: /etc/audit/rules.d/99-ansible.rules
+# Lynis audits the system: sudo lynis audit system. Debian/Ubuntu only (on the
+# RHEL family it needs EPEL, which this playbook does not add).
+harden_lynis: false
+
+# ---------------------------------------------------------------------------
+# logrotate (tag: logrotate). Installs logrotate with its timer and rotates the
+# logs this playbook creates (the sudo log) plus logrotate_extra_logs.
+# Docker, CrowdSec, UFW, auditd and the journal rotate themselves.
+# ---------------------------------------------------------------------------
+logrotate_enabled: true
+logrotate_file: /etc/logrotate.d/ansible-managed
+logrotate_extra_logs: []
+logrotate_rotate: 8

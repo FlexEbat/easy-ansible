@@ -1,0 +1,21 @@
+---
+- name: Install the sudo hardening drop-in
+  ansible.builtin.copy:
+    dest: "{{ harden_sudo_file }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+    content: |
+      # Managed by Ansible
+      Defaults use_pty
+      Defaults logfile="{{ harden_sudo_logfile }}"
+      Defaults log_host, log_year
+      Defaults timestamp_timeout={{ harden_sudo_timestamp_timeout }}
+  when: harden_sudo | bool
+
+- name: Remove the sudo hardening drop-in
+  ansible.builtin.file:
+    path: "{{ harden_sudo_file }}"
+    state: absent
+  when: not (harden_sudo | bool)

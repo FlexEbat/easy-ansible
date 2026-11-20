@@ -5,3 +5,9 @@ firewalld_zone: ""
 # UFW only: rate-limit new SSH connections (6 in 30 s per source address)
 # instead of a plain allow. Useful while password login is enabled.
 firewall_ssh_rate_limit: true
+
+# After ssh_port was changed, the rule for port 22 is kept (so that a mistake
+# cannot lock you out). Set this to true once you have logged in on the new
+# port: the playbook then verifies that sshd listens there and removes the
+# port-22 rule.
+firewall_close_old_ssh_port: false

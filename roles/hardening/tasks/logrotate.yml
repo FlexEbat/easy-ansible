@@ -1,0 +1,64 @@
+---
+- name: Work out which logs to rotate
+  ansible.builtin.set_fact:
+    logrotate_effective_logs: >-
+      {{ (([harden_sudo_logfile] if harden_sudo | bool else []) + logrotate_extra_logs) | unique }}
+
+- name: Configure logrotate
+  when: logrotate_enabled | bool
+  block:
+    - name: Install logrotate
+      ansible.builtin.package:
+        name: logrotate
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Check whether the logrotate timer exists
+      ansible.builtin.command:
+        cmd: systemctl list-unit-files logrotate.timer
+      register: logrotate_timer_unit
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Ensure the logrotate timer is enabled
+      ansible.builtin.systemd_service:
+        name: logrotate.timer
+        enabled: true
+        state: started
+      when: "'logrotate.timer' in logrotate_timer_unit.stdout"
+
+    - name: Write the logrotate configuration
+      ansible.builtin.copy:
+        dest: "{{ logrotate_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          {% for log in logrotate_effective_logs %}
+          {{ log }}
+          {% endfor %}
+          {
+              weekly
+              rotate {{ logrotate_rotate }}
+              compress
+              delaycompress
+              missingok
+              notifempty
+              create 0640 root root
+          }
+      when: logrotate_effective_logs | length > 0
+
+    - name: Remove the logrotate configuration when there is nothing to rotate
+      ansible.builtin.file:
+        path: "{{ logrotate_file }}"
+        state: absent
+      when: logrotate_effective_logs | length == 0
+
+- name: Remove the logrotate configuration
+  ansible.builtin.file:
+    path: "{{ logrotate_file }}"
+    state: absent
+  when: not (logrotate_enabled | bool)

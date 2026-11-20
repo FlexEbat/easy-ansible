@@ -1,0 +1,31 @@
+---
+# Runs at the very end of the play, after sshd was reloaded.
+- name: Verify that sshd listens on the new SSH port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ ssh_port | int }}"
+    timeout: 20
+  when: ssh_port | int != 22
+
+- name: Remove the old SSH rule (UFW)
+  community.general.ufw:
+    rule: "{{ 'limit' if firewall_ssh_rate_limit | bool else 'allow' }}"
+    port: "22"
+    proto: tcp
+    delete: true
+  when:
+    - is_debian | bool
+    - ssh_port | int != 22
+    - firewall_close_old_ssh_port | bool
+
+- name: Remove the old SSH service rule (firewalld)
+  ansible.posix.firewalld:
+    service: ssh
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: disabled
+  when:
+    - is_rhel | bool
+    - ssh_port | int != 22
+    - firewall_close_old_ssh_port | bool

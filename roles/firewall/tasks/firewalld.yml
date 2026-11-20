@@ -19,9 +19,9 @@
   when: firewalld_zone | length == 0
 
 # ---------------------------------------------------------------------------
-# SSH stays on its default port; firewalld already ships an "ssh" service
-# definition for it. firewalld denies unmatched incoming traffic, so an
-# explicit allow is required.
+# SSH. On port 22 the "ssh" service definition is used (it also stays enabled
+# while the port is being changed, see firewall_close_old_ssh_port); any other
+# port is opened as a plain port. firewalld denies unmatched incoming traffic.
 # ---------------------------------------------------------------------------
 - name: Allow the SSH service in the zone
   ansible.posix.firewalld:
@@ -30,6 +30,15 @@
     permanent: true
     immediate: true
     state: enabled
+
+- name: Allow the configured SSH port in the zone
+  ansible.posix.firewalld:
+    port: "{{ ssh_port }}/tcp"
+    zone: "{{ firewalld_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  when: ssh_port | int != 22
 
 # ---------------------------------------------------------------------------
 # Additional ports (services published by Docker, web servers, ...)

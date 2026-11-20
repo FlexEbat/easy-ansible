@@ -1,0 +1,40 @@
+---
+- name: Allow only selected users to use cron and at
+  ansible.builtin.copy:
+    dest: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      {% for user in (['root', admin_user] + harden_cron_allow_users) | unique %}
+      {{ user }}
+      {% endfor %}
+  loop:
+    - /etc/cron.allow
+    - /etc/at.allow
+  when: harden_cron_at | bool
+
+# Only files created by this playbook are removed.
+- name: Check which allow files are managed by Ansible
+  ansible.builtin.command:
+    cmd: "grep -qx '# Managed by Ansible' {{ item }}"
+  loop:
+    - /etc/cron.allow
+    - /etc/at.allow
+  register: harden_cron_managed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not (harden_cron_at | bool)
+
+- name: Remove the cron and at allow lists
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  loop: "{{ harden_cron_managed.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - not (harden_cron_at | bool)
+    - item.rc | default(1) == 0

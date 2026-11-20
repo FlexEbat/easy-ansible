@@ -1,0 +1,17 @@
+---
+- name: Install Lynis
+  ansible.builtin.apt:
+    name: lynis
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when:
+    - harden_lynis | bool
+    - is_debian | bool
+
+- name: Explain why Lynis is skipped on the RHEL family
+  ansible.builtin.debug:
+    msg: "Lynis is not in the base RHEL repositories (it needs EPEL); skipped."
+  when:
+    - harden_lynis | bool
+    - is_rhel | bool

@@ -1,0 +1,7 @@
+---
+# Default settings: what a plain run does.
+admin_user: runner
+admin_user_sudo_nopasswd: true
+# GitHub runners already have a working network; the trippy download is the
+# only external step that can be flaky, so it is left out of the CI run.
+base_install_trippy: false

@@ -70,3 +70,8 @@
   ansible.builtin.debug:
     msg: "{{ docker_version.stdout }}"
   when: docker_service_enabled | bool
+
+- name: Configure the scheduled Docker cleanup
+  ansible.builtin.import_tasks: prune.yml
+  when: docker_service_enabled | bool
+  tags: [docker_prune]

@@ -110,10 +110,19 @@ if [ "$DEFAULT_USER" = "root" ]; then
   DEFAULT_USER="admin"
 fi
 
+generate_username() {
+  python3 -c 'import secrets, string; print("adm-" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6)))'
+}
+
 echo
+echo "Пользователь-администратор получит sudo. Введите имя, либо auto — сгенерировать случайное."
 while true; do
   ask "Пользователь-администратор (если его нет, он будет создан)" "$DEFAULT_USER"
   ADMIN="$REPLY"
+  if [ "$ADMIN" = "auto" ]; then
+    ADMIN=$(generate_username)
+    echo "  Сгенерировано имя: $ADMIN (запишите его, оно будет показано в конце)."
+  fi
   if [[ "$ADMIN" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
     break
   fi
@@ -262,10 +271,73 @@ if yesno "Публиковать порты Docker только на localhost (
   DOCKER_LOCAL=1
 fi
 
+# --- SSH ---------------------------------------------------------------------------
+SSH_PORT=22
+SSH_HARDEN=0
+SSH_EXTRA=0
+SSH_CRYPTO=0
+echo
+if yesno "Сменить порт SSH (по умолчанию 22)? Порт будет открыт в firewall автоматически" n; then
+  while true; do
+    ask "Новый порт SSH (1-65535)" 2222
+    if [[ "$REPLY" =~ ^[0-9]{1,5}$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le 65535 ]; then
+      SSH_PORT="$REPLY"
+      break
+    fi
+    echo "  Неверный порт."
+  done
+  echo "  Откройте $SSH_PORT/tcp и в firewall хостера; старое правило для порта 22 останется,"
+  echo "  пока вы не включите firewall_close_old_ssh_port (см. README)."
+fi
+if [ -n "$KEY" ]; then
+  if yesno "Запретить вход по паролю и вход root (только по ключу)?" y; then
+    SSH_HARDEN=1
+  fi
+else
+  echo "  Ключ не задан: вход по паролю останется (иначе вы потеряете доступ)."
+fi
+if yesno "Дополнительные настройки sshd (таймауты, лимиты; туннели и прокси продолжают работать)?" n; then
+  SSH_EXTRA=1
+fi
+if yesno "Только современные алгоритмы шифрования SSH (очень старые клиенты не подключатся)?" n; then
+  SSH_CRYPTO=1
+fi
+
+# --- optional hardening: every item is off unless you say yes -----------------------
+HARDEN_LIST=""
+DOCKER_PRUNE=0
+echo
+echo "Дополнительная защита. Всё необязательно и отключается обратно (см. раздел «Откат» в README)."
+if yesno "Включить рекомендуемый набор (sysctl, sudo, пароли, без core dump, чёрный список модулей, баннер, MAC)?" n; then
+  HARDEN_LIST="harden_sysctl harden_sudo harden_password_policy harden_coredumps harden_kernel_modules harden_banner harden_mac"
+fi
+for item in \
+  "harden_sysctl|дополнительные sysctl (kptr_restrict, ptrace_scope, protected_*)" \
+  "harden_sudo|sudo: use_pty, отдельный лог, таймаут пароля 5 минут" \
+  "harden_password_policy|политика паролей (минимум 12 символов, 3 класса)" \
+  "harden_coredumps|запретить создание core dump" \
+  "harden_kernel_modules|чёрный список редких модулей ядра (dccp, sctp, rds, tipc, cramfs...)" \
+  "harden_banner|предупреждающий баннер при входе" \
+  "harden_cron_at|cron/at только для root и администратора" \
+  "harden_mac|AppArmor (Debian/Ubuntu) / SELinux (RHEL): включить и обновить" \
+  "harden_auditd|auditd с набором правил" \
+  "harden_lynis|установить Lynis (аудит: sudo lynis audit system)"; do
+  var="${item%%|*}"
+  case " $HARDEN_LIST " in *" $var "*) continue ;; esac
+  if yesno "  $var: ${item#*|}?" n; then
+    HARDEN_LIST="$HARDEN_LIST $var"
+  fi
+done
+if yesno "Раз в неделю чистить неиспользуемые данные Docker (volumes не трогаются)?" n; then
+  DOCKER_PRUNE=1
+fi
+
 # --- write the file ---------------------------------------------------------------------
 export WZ_OUT="$OUT" WZ_ADMIN="$ADMIN" WZ_KEY="$KEY" WZ_HASH="$HASH" WZ_NOPASSWD="$NOPASSWD"
 export WZ_IPS="$IPS" WZ_CIDRS="$CIDRS" WZ_PORTS="$PORTS" WZ_PORTS_FROM="$PORTS_FROM"
 export WZ_IPV6_OFF="$IPV6_OFF" WZ_DOCKER_LOCAL="$DOCKER_LOCAL"
+export WZ_SSH_PORT="$SSH_PORT" WZ_SSH_HARDEN="$SSH_HARDEN" WZ_SSH_EXTRA="$SSH_EXTRA" WZ_SSH_CRYPTO="$SSH_CRYPTO"
+export WZ_HARDEN="$HARDEN_LIST" WZ_DOCKER_PRUNE="$DOCKER_PRUNE"
 
 python3 - <<'PY'
 import datetime
@@ -310,6 +382,18 @@ else:
 lines.append("disable_ipv6: %s" % ("true" if env["WZ_IPV6_OFF"] == "1" else "false"))
 if env["WZ_DOCKER_LOCAL"] == "1":
     lines.append('docker_default_bind_ip: "127.0.0.1"')
+if env["WZ_SSH_PORT"] != "22":
+    lines.append("ssh_port: %s" % env["WZ_SSH_PORT"])
+if env["WZ_SSH_HARDEN"] == "1":
+    lines += ["ssh_harden: true", "ssh_password_auth: false", 'ssh_permit_root_login: "no"']
+if env["WZ_SSH_EXTRA"] == "1":
+    lines.append("ssh_harden_extra: true")
+if env["WZ_SSH_CRYPTO"] == "1":
+    lines.append("ssh_modern_crypto: true")
+for name in env["WZ_HARDEN"].split():
+    lines.append("%s: true" % name)
+if env["WZ_DOCKER_PRUNE"] == "1":
+    lines.append("docker_prune_enabled: true")
 # Automatic updates (unattended-upgrades / dnf-automatic) stay on; automatic reboots stay off.
 lines += ["auto_updates_enabled: true", "auto_reboot: false"]
 
@@ -325,5 +409,9 @@ fi
 
 echo
 echo "== Готово: $OUT =="
+echo "Администратор: $ADMIN$([ "$USER_EXISTS" -eq 0 ] && echo ' (будет создан, с sudo)' || echo ' (sudo проверяется)')"
+if [ "$SSH_PORT" != "22" ]; then
+  echo "Порт SSH: $SSH_PORT  ->  ssh -p $SSH_PORT $ADMIN@<сервер>"
+fi
 sed -E 's/^(admin_user_password_hash: ).*/\1"<скрыто>"/' "$OUT"
 echo

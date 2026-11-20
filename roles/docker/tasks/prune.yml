@@ -1,0 +1,73 @@
+---
+- name: Install the Docker cleanup service and timer
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ item.content }}"
+  loop:
+    - name: docker-prune.service
+      content: |
+        # Managed by Ansible
+        [Unit]
+        Description=Remove unused Docker data
+        After=docker.service
+        Requires=docker.service
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/bin/docker system prune --force --filter until={{ docker_prune_until }}{{ ' --all' if docker_prune_all_images | bool else '' }}{{ ' --volumes' if docker_prune_volumes | bool else '' }}
+    - name: docker-prune.timer
+      content: |
+        # Managed by Ansible
+        [Unit]
+        Description=Scheduled Docker cleanup
+
+        [Timer]
+        OnCalendar={{ docker_prune_schedule }}
+        RandomizedDelaySec=1h
+        Persistent=true
+
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  when: docker_prune_enabled | bool
+  register: docker_prune_units
+
+- name: Enable the Docker cleanup timer
+  ansible.builtin.systemd_service:
+    name: docker-prune.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: docker_prune_enabled | bool
+
+- name: Check whether the Docker cleanup timer is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/docker-prune.timer
+  register: docker_prune_timer_file
+  when: not (docker_prune_enabled | bool)
+
+- name: Stop the Docker cleanup timer
+  ansible.builtin.systemd_service:
+    name: docker-prune.timer
+    enabled: false
+    state: stopped
+  when:
+    - not (docker_prune_enabled | bool)
+    - docker_prune_timer_file.stat.exists | default(false)
+
+- name: Remove the Docker cleanup units
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop: [docker-prune.service, docker-prune.timer]
+  register: docker_prune_removed
+  when: not (docker_prune_enabled | bool)
+
+- name: Reload systemd after removing the cleanup units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: docker_prune_removed is changed

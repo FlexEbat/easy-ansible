@@ -29,3 +29,11 @@ crowdsec_whitelist_path: /etc/crowdsec/parsers/s02-enrich/ansible-whitelist.yaml
 # VPN/LAN networks here (or per host/group in the inventory).
 crowdsec_whitelist_ips: []
 crowdsec_whitelist_cidrs: []
+
+# Docker publishes ports through its own rules and bypasses UFW/firewalld, so
+# instead of extra firewall rules the CrowdSec bouncer also filters the
+# DOCKER-USER chain (iptables) or the forward hook (nftables): banned
+# addresses cannot reach published container ports either. Needs Docker to be
+# installed first (the docker role runs before crowdsec).
+crowdsec_docker_protection: true
+crowdsec_bouncer_dropin: /etc/systemd/system/crowdsec-firewall-bouncer.service.d/10-docker.conf

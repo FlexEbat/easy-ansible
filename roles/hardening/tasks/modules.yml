@@ -1,0 +1,29 @@
+---
+- name: Ensure the modprobe configuration directory exists
+  ansible.builtin.file:
+    path: "{{ harden_blacklist_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: harden_kernel_modules | bool
+
+- name: Blacklist rarely needed kernel modules
+  ansible.builtin.copy:
+    dest: "{{ harden_blacklist_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      {% for module in (harden_blacklist_modules + harden_blacklist_modules_extra) | unique %}
+      install {{ module }} /bin/false
+      blacklist {{ module }}
+      {% endfor %}
+  when: harden_kernel_modules | bool
+
+- name: Remove the kernel module blacklist
+  ansible.builtin.file:
+    path: "{{ harden_blacklist_file }}"
+    state: absent
+  when: not (harden_kernel_modules | bool)

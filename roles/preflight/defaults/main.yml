@@ -1,0 +1,11 @@
+---
+# Pre-flight checks run before anything is changed. Every failed check aborts
+# the whole play (the play uses any_errors_fatal).
+preflight_min_disk_mb: 1024
+preflight_min_memory_mb: 400
+# Check that the package repositories can be reached over HTTPS.
+preflight_check_network: true
+# Allow creating an admin user that nobody can log in as (no key, no password).
+preflight_allow_locked_admin: false
+# true = run only the checks and stop (./run.sh --preflight).
+preflight_only: false
