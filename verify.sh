@@ -160,10 +160,11 @@ fi
 
 if json_true ssh_modern_crypto; then
   if sshd -T 2>/dev/null | grep -q '^ciphers .*chacha20-poly1305' &&
-     ! sshd -T 2>/dev/null | grep -q '^ciphers .*aes128-cbc'; then
-    pass "SSH uses only the modern cipher list"
+     ! sshd -T 2>/dev/null | grep -q '^ciphers .*-cbc' &&
+     ! sshd -T 2>/dev/null | grep -q '^kexalgorithms .*diffie-hellman-group'; then
+    pass "SSH offers no CBC ciphers and no finite-field Diffie-Hellman"
   else
-    fail "SSH cipher list is not the modern one"
+    fail "SSH still offers CBC ciphers or finite-field Diffie-Hellman"
   fi
 fi
 

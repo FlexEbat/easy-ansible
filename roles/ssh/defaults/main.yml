@@ -43,13 +43,15 @@ ssh_allow_agent_forwarding: false
 ssh_allow_users: []
 ssh_allow_groups: []
 
-# Only modern key exchange / cipher / MAC algorithms (ssh_modern_crypto=true).
-# The list works on every supported OS (OpenSSH 8.9+); very old clients will no
-# longer connect.
-ssh_modern_crypto: false
-ssh_kex_algorithms: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512"
-ssh_ciphers: "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
-ssh_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com"
+# Remove weak algorithms from the DEFAULT lists (ssh_modern_crypto=true). A "-"
+# in front subtracts from what OpenSSH already offers instead of replacing it,
+# so newer defaults such as the post-quantum hybrid KEX (sntrup761x25519,
+# mlkem768x25519 in OpenSSH 9.9+) stay available on every OpenSSH version.
+# Removed: finite-field Diffie-Hellman (OpenSSH 10 drops it by default too),
+# CBC ciphers, SHA-1/MD5/64-bit MACs. Very old clients may no longer connect.
+ssh_kex_algorithms: "-diffie-hellman-group*"
+ssh_ciphers: "-*-cbc"
+ssh_macs: "-*md5*,hmac-sha1,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-64-etm@openssh.com"
 
 # Pre-login banner (see harden_banner in the hardening role); empty = none.
 ssh_banner_file: "{{ harden_banner_file if harden_banner | bool else '' }}"

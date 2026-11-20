@@ -567,7 +567,7 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 | `ssh_harden` + `ssh_password_auth: false` | запрет входа по паролю и root |
 | `ssh_harden_extra` | `LoginGraceTime 30`, `ClientAliveInterval 300`, `ClientAliveCountMax 2`, `MaxSessions 10`, запрет agent forwarding. **TCP-forwarding остаётся разрешённым**, поэтому `ssh -L/-D`, `ProxyJump` и SSH-туннели работают |
 | `ssh_allow_users`, `ssh_allow_groups` | кто может входить |
-| `ssh_modern_crypto` | только современные KEX/шифры/MAC |
+| `ssh_modern_crypto` | убирает слабое из списков по умолчанию (DH на конечных полях, CBC, SHA-1/MD5 MAC); пост-квантовый обмен ключами остаётся |
 | `harden_banner` | баннер до входа |
 
 Перед сменой порта откройте его и в firewall хостера и не закрывайте текущую
