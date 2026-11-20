@@ -84,11 +84,25 @@
     enabled: "{{ zram_usable }}"
     daemon_reload: true
 
+# zram is a memory optimisation, not a security feature: a kernel that cannot
+# start it (missing compression algorithm, restricted VM) must not abort the run.
 - name: Start or restart the zramswap service
   ansible.builtin.systemd_service:
     name: zramswap
     state: "{{ 'restarted' if zram_config is changed else 'started' }}"
+  register: zram_start
+  failed_when: false
   when: zram_usable | bool
+
+- name: Warn when zramswap could not be started
+  ansible.builtin.debug:
+    msg: >-
+      zramswap did not start ({{ zram_start.msg | default('unknown error') | trim }}).
+      Check "journalctl -u zramswap"; a different zram_algorithm (for example
+      lzo-rle) may be needed on this kernel. The rest of the setup continues.
+  when:
+    - zram_start is defined
+    - zram_start.failed | default(false)
 
 - name: Keep zramswap stopped when zram is unavailable
   ansible.builtin.systemd_service:
