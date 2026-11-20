@@ -51,3 +51,53 @@ jobs:
           fi
       - name: Verify
         run: sudo ./verify.sh
+
+  # The same two-run check on every supported OS, in systemd containers.
+  # Inside a container the host-kernel parts (auditd, AppArmor/SELinux, sysctl,
+  # zram, GRUB) are skipped automatically, so this covers packages, users,
+  # SSH, firewall, CrowdSec and Docker configuration per distribution.
+  os-matrix:
+    name: ${{ matrix.os }}
+    needs: syntax
+    runs-on: ubuntu-24.04
+    # Rocky Linux 8 is best effort (old system Python); it does not fail the run.
+    continue-on-error: ${{ matrix.os == 'rockylinux8' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [debian13, ubuntu2404, rockylinux9, rockylinux8]
+        include:
+          - {os: debian13, init: /lib/systemd/systemd}
+          - {os: ubuntu2404, init: /lib/systemd/systemd}
+          - {os: rockylinux9, init: /usr/lib/systemd/systemd}
+          - {os: rockylinux8, init: /usr/lib/systemd/systemd}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: |
+          python3 -m venv ~/venv
+          ~/venv/bin/pip install ansible
+      - name: Start the container
+        run: |
+          docker run -d --name target --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
+            geerlingguy/docker-${{ matrix.os }}-ansible:latest ${{ matrix.init }}
+          docker exec target sh -c 'for i in $(seq 30); do systemctl is-system-running 2>/dev/null | grep -Eq "running|degraded" && exit 0; sleep 1; done; exit 0'
+      - name: First run
+        run: >-
+          ~/venv/bin/ansible-playbook -i target, -c community.docker.docker site.yml
+          -e @ci/vars-default.yml -e admin_user=root -e preflight_check_network=true
+      - name: Second run (must not change anything)
+        run: |
+          ~/venv/bin/ansible-playbook -i target, -c community.docker.docker site.yml \
+            -e @ci/vars-default.yml -e admin_user=root | tee second-run.log
+          if ! grep -Eq 'changed=0[[:space:]]+unreachable=0[[:space:]]+failed=0' second-run.log; then
+            echo "::error::the second run changed something on ${{ matrix.os }}"
+            grep -B3 -E '^changed:' second-run.log || true
+            exit 1
+          fi
+      - name: Verify
+        run: |
+          docker cp verify.sh target:/root/verify.sh
+          docker exec target bash /root/verify.sh
+
