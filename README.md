@@ -389,12 +389,14 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
   (`upgrade_type = default`, `apply_updates` управляется
   `auto_updates_enabled`).
 - `trippy` (`roles/base/tasks/trippy.yml`, общий для обоих семейств) ставится
-  только из репозиториев дистрибутива (`apt`/`dnf`), всегда последней
-  доступной там версии; ничего не закреплено. Если в репозиториях пакета нет,
-  шаг пропускается (остаётся `mtr`). Отключается `base_install_trippy=false`.
+  из репозитория дистрибутива, если доступен; иначе загружается upstream-артефакт
+  с проверкой SHA-256 (`.deb`/RPM для x86_64, tarball для aarch64). На других
+  архитектурах пропускается. Отключается `base_install_trippy=false`.
 - `chrony` (синхронизация времени; не в контейнерах) и лимит `journald`
   (`/etc/systemd/journald.conf.d/99-ansible.conf`).
-- `auto_reboot=true` включает автоперезагрузку после обновлений
+- Автоперезагрузка выключена по умолчанию (`auto_reboot: false`), `wizard.sh` её не
+  включает, а `unattended-upgrades` включён (`auto_updates_enabled: true`).
+  `auto_reboot=true` включает автоперезагрузку после обновлений
   (`Automatic-Reboot` в unattended-upgrades; `reboot = when-needed` в
   dnf-automatic — на старых dnf-automatic опция игнорируется).
 - В конце проверяется `/var/run/reboot-required` (Debian/Ubuntu) или

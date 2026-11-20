@@ -116,13 +116,13 @@ for pkg in $PACKAGES; do
   fi
 done
 
-# trippy is installed from the distribution repositories only; it may be
-# missing when the repositories do not provide it, so only the command is checked.
+# trippy is a distribution package, an upstream package or a plain binary
+# depending on the OS and architecture, so only the command is checked.
 if json_true base_install_trippy; then
   if command -v trippy >/dev/null 2>&1 || command -v trip >/dev/null 2>&1; then
     pass "trippy binary is available"
   else
-    skip "trippy binary is not available (not provided by the distribution repositories?)"
+    skip "trippy binary is not available (no pinned upstream build for $(uname -m)?)"
   fi
 fi
 

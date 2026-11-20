@@ -262,17 +262,10 @@ if yesno "Публиковать порты Docker только на localhost (
   DOCKER_LOCAL=1
 fi
 
-REBOOT=0
-if [ "$KIND" = "server" ]; then
-  if yesno "Перезагружать сервер автоматически после обновлений ядра (в 04:00)?" n; then
-    REBOOT=1
-  fi
-fi
-
 # --- write the file ---------------------------------------------------------------------
 export WZ_OUT="$OUT" WZ_ADMIN="$ADMIN" WZ_KEY="$KEY" WZ_HASH="$HASH" WZ_NOPASSWD="$NOPASSWD"
 export WZ_IPS="$IPS" WZ_CIDRS="$CIDRS" WZ_PORTS="$PORTS" WZ_PORTS_FROM="$PORTS_FROM"
-export WZ_IPV6_OFF="$IPV6_OFF" WZ_DOCKER_LOCAL="$DOCKER_LOCAL" WZ_REBOOT="$REBOOT"
+export WZ_IPV6_OFF="$IPV6_OFF" WZ_DOCKER_LOCAL="$DOCKER_LOCAL"
 
 python3 - <<'PY'
 import datetime
@@ -317,8 +310,8 @@ else:
 lines.append("disable_ipv6: %s" % ("true" if env["WZ_IPV6_OFF"] == "1" else "false"))
 if env["WZ_DOCKER_LOCAL"] == "1":
     lines.append('docker_default_bind_ip: "127.0.0.1"')
-if env["WZ_REBOOT"] == "1":
-    lines += ["auto_reboot: true", 'auto_reboot_time: "04:00"']
+# Automatic updates (unattended-upgrades / dnf-automatic) stay on; automatic reboots stay off.
+lines += ["auto_updates_enabled: true", "auto_reboot: false"]
 
 with open(env["WZ_OUT"], "w", encoding="utf-8") as handle:
     handle.write("\n".join(lines) + "\n")
