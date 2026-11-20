@@ -135,6 +135,17 @@
   check_mode: false
   when: not (is_container | bool)
 
+- name: Ensure the ssh.socket drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ ssh_socket_dropin | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - ssh_socket_state.stdout | default('') | trim == 'active'
+    - ssh_port | int != 22
+
 - name: Point ssh.socket at the configured port
   ansible.builtin.copy:
     dest: "{{ ssh_socket_dropin }}"

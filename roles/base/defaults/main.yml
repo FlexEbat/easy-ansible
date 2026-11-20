@@ -90,3 +90,8 @@ trippy_known_checksums:
     rpm: "sha256:7c845f29d7cc7cc588609949442673b8f4b37b7c0d8142d16305355a48b1b217"
     tarball_x86_64: "sha256:c4245db59d3251df3c3045752d931afbed00b97896adeb93be62bf0bf3933f09"
     tarball_aarch64: "sha256:0afa3fc574066ff0d91d9e81ec0da012822c83bb39f691f52b562f9b6bbdaae3"
+
+# Upgrade every installed package on each run. Turn it off for repeatable
+# test runs (new upstream updates would otherwise show up as changes).
+base_upgrade_packages: true
+

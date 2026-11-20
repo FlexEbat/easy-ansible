@@ -8,6 +8,7 @@
   retries: 3
   delay: 5
   until: dnf_upgrade is succeeded
+  when: base_upgrade_packages | bool
 
 # EPEL is in the extras repository on AlmaLinux/Rocky/CentOS but not on RHEL
 # itself, where it has to be installed from the Fedora project.

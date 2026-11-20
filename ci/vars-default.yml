@@ -5,3 +5,5 @@ admin_user_sudo_nopasswd: true
 # GitHub runners already have a working network; the trippy download is the
 # only external step that can be flaky, so it is left out of the CI run.
 base_install_trippy: false
+# Upstream updates between the two runs are not playbook changes.
+base_upgrade_packages: false

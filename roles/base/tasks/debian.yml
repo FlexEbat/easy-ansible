@@ -3,7 +3,7 @@
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
-    upgrade: dist
+    upgrade: "{{ 'dist' if base_upgrade_packages | bool else 'no' }}"
     autoremove: true
     autoclean: true
     dpkg_options: "force-confdef,force-confold"

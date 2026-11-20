@@ -15,7 +15,8 @@ crowdsec_packages_rhel:
   - crowdsec
   - crowdsec-firewall-bouncer-nftables
 crowdsec_rhel_repo_file: /etc/yum.repos.d/crowdsec_crowdsec.repo
-crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/$releasever/$basearch"
+# CrowdSec publishes no el/10 repository; its el9 packages are used on EL 10.
+crowdsec_rhel_repo_url: "https://packagecloud.io/crowdsec/crowdsec/el/{{ '9' if ansible_facts['distribution_major_version'] | int >= 10 else '$releasever' }}/$basearch"
 crowdsec_bouncer_config: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
 # UFW uses the iptables backend; firewalld is nftables-based.
 crowdsec_bouncer_mode: "{{ 'nftables' if firewall_backend == 'firewalld' else 'iptables' }}"

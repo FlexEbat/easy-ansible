@@ -21,3 +21,5 @@ harden_mac: true
 harden_auditd: true
 harden_lynis: true
 docker_prune_enabled: true
+# Upstream updates between the two runs are not playbook changes.
+base_upgrade_packages: false

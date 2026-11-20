@@ -129,6 +129,9 @@ if json_true base_install_trippy; then
 fi
 
 section "SSH"
+if is_container; then
+  skip "sshd is not started inside $container_type"
+else
 if ss -ltnH "sport = :$SSH_PORT" | grep -q .; then
   pass "sshd is listening on port $SSH_PORT"
 else
@@ -143,6 +146,7 @@ fi
 
 if [ "$SSH_PORT" != "22" ] && sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
   fail "sshd still listens on port 22 next to $SSH_PORT (explicit Port line elsewhere?)"
+fi
 fi
 
 if json_true ssh_harden_extra; then
