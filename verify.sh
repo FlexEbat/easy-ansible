@@ -116,13 +116,13 @@ for pkg in $PACKAGES; do
   fi
 done
 
-# trippy is a distribution package, an upstream package or a plain binary
+# trippy is the newest upstream package or binary, or a distribution package
 # depending on the OS and architecture, so only the command is checked.
 if json_true base_install_trippy; then
   if command -v trippy >/dev/null 2>&1 || command -v trip >/dev/null 2>&1; then
     pass "trippy binary is available"
   else
-    skip "trippy binary is not available (no pinned upstream build for $(uname -m)?)"
+    skip "trippy binary is not available (no upstream build for $(uname -m) and not in the distribution repositories?)"
   fi
 fi
 

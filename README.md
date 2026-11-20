@@ -356,6 +356,8 @@ sudo ./verify.sh
 | `base_time_sync` | `true` | установить и включить `chrony` (не в контейнерах) |
 | `base_journald_max_use` | `500M` | `SystemMaxUse` для journald; пустая строка — не трогать |
 | `base_install_trippy` | `true` | ставить `trippy` (`false` — только `mtr`) |
+| `trippy_version` | `latest` | версия `trippy`: `latest` — всегда последний релиз upstream, либо точная версия |
+| `trippy_allow_unverified` | `true` | ставить релизы без известной SHA-256 (`false` — только проверенные) |
 | `disable_ipv6` | `true` | отключить IPv6; `false` убирает конфиги (эффект после перезагрузки) |
 | `kernel_rp_filter` | `2` | `rp_filter`: 2 loose (безопасно с VPN/Docker), 1 strict, 0 off |
 | `kernel_log_martians` | `0` | логировать martian-пакеты |
@@ -388,10 +390,17 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
 - Debian/Ubuntu: настраивается `unattended-upgrades`; RHEL: `dnf-automatic`
   (`upgrade_type = default`, `apply_updates` управляется
   `auto_updates_enabled`).
-- `trippy` (`roles/base/tasks/trippy.yml`, общий для обоих семейств) ставится
-  из репозитория дистрибутива, если доступен; иначе загружается upstream-артефакт
-  с проверкой SHA-256 (`.deb`/RPM для x86_64, tarball для aarch64). На других
-  архитектурах пропускается. Отключается `base_install_trippy=false`.
+- `trippy` (`roles/base/tasks/trippy.yml`, общий для обоих семейств): при каждом
+  запуске определяется последний релиз upstream (по редиректу
+  `github.com/fujiapple852/trippy/releases/latest`, без API) и ставится или
+  обновляется до него: `.deb`/RPM на x86_64, tarball на aarch64. Если последний
+  релиз определить не удалось или на архитектуре нет upstream-сборки, берётся
+  пакет из репозитория дистрибутива (если он там есть); иначе шаг пропускается.
+  Upstream не публикует контрольные суммы, поэтому SHA-256 проверяется только для
+  версий из `trippy_known_checksums`; для более новых релизов файл скачивается с
+  официальной страницы релиза по HTTPS без проверки суммы (запретить это:
+  `trippy_allow_unverified: false`). Ошибка установки не прерывает плейбук.
+  Отключается `base_install_trippy=false`; закрепить версию — `trippy_version: "0.13.0"`.
 - `chrony` (синхронизация времени; не в контейнерах) и лимит `journald`
   (`/etc/systemd/journald.conf.d/99-ansible.conf`).
 - Автоперезагрузка выключена по умолчанию (`auto_reboot: false`), `wizard.sh` её не
