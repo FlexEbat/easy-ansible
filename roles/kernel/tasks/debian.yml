@@ -91,7 +91,7 @@
     name: zramswap
     state: "{{ 'restarted' if zram_config is changed else 'started' }}"
   register: zram_start
-  failed_when: false
+  ignore_errors: true  # noqa: ignore-errors
   when: zram_usable | bool
 
 - name: Warn when zramswap could not be started
@@ -102,7 +102,7 @@
       lzo-rle) may be needed on this kernel. The rest of the setup continues.
   when:
     - zram_start is defined
-    - zram_start.failed | default(false)
+    - zram_start is failed
 
 - name: Keep zramswap stopped when zram is unavailable
   ansible.builtin.systemd_service:

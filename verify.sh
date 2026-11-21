@@ -92,6 +92,10 @@ SSH_PORT=$(json_get ssh_port)
 SSH_PORT="${SSH_PORT:-22}"
 
 container_type=$(systemd-detect-virt --container 2>/dev/null || true)
+# sshd -T refuses to run without its privilege separation directory, which only
+# exists once sshd has been started (socket-activated sshd may not have been).
+sshd_T() { mkdir -p /run/sshd 2>/dev/null; sshd -T 2>/dev/null; }
+
 is_container() { [ -n "$container_type" ] && [ "$container_type" != "none" ]; }
 
 section "Summary"
@@ -138,20 +142,20 @@ else
   fail "sshd is not listening on port $SSH_PORT"
 fi
 
-if sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx "$SSH_PORT"; then
+if sshd_T | awk '$1=="port"{print $2}' | grep -qx "$SSH_PORT"; then
   pass "sshd effective config uses port $SSH_PORT"
 else
   fail "sshd effective config does not use port $SSH_PORT"
 fi
 
-if [ "$SSH_PORT" != "22" ] && sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | grep -qx 22; then
+if [ "$SSH_PORT" != "22" ] && sshd_T | awk '$1=="port"{print $2}' | grep -qx 22; then
   fail "sshd still listens on port 22 next to $SSH_PORT (explicit Port line elsewhere?)"
 fi
 fi
 
 if json_true ssh_harden_extra; then
-  if sshd -T 2>/dev/null | grep -qx "logingracetime 30" &&
-     sshd -T 2>/dev/null | grep -qx "allowtcpforwarding yes"; then
+  if sshd_T | grep -qx "logingracetime 30" &&
+     sshd_T | grep -qx "allowtcpforwarding yes"; then
     pass "extra sshd settings are active (TCP forwarding stays allowed for tunnels/proxies)"
   else
     fail "extra sshd settings are not active"
@@ -159,9 +163,9 @@ if json_true ssh_harden_extra; then
 fi
 
 if json_true ssh_modern_crypto; then
-  if sshd -T 2>/dev/null | grep -q '^ciphers .*chacha20-poly1305' &&
-     ! sshd -T 2>/dev/null | grep -q '^ciphers .*-cbc' &&
-     ! sshd -T 2>/dev/null | grep -q '^kexalgorithms .*diffie-hellman-group'; then
+  if sshd_T | grep -q '^ciphers .*chacha20-poly1305' &&
+     ! sshd_T | grep -q '^ciphers .*-cbc' &&
+     ! sshd_T | grep -q '^kexalgorithms .*diffie-hellman-group'; then
     pass "SSH offers no CBC ciphers and no finite-field Diffie-Hellman"
   else
     fail "SSH still offers CBC ciphers or finite-field Diffie-Hellman"
@@ -174,7 +178,7 @@ if json_true ssh_harden; then
   else
     expected_pw="no"
   fi
-  if sshd -T 2>/dev/null | grep -qx "passwordauthentication $expected_pw"; then
+  if sshd_T | grep -qx "passwordauthentication $expected_pw"; then
     pass "SSH password authentication is '$expected_pw' as configured"
   else
     fail "SSH password authentication is not '$expected_pw'"
@@ -183,7 +187,7 @@ if json_true ssh_harden; then
   # sshd -T reports "prohibit-password" as "without-password".
   expected_root="$SSH_PERMIT_ROOT_LOGIN"
   [ "$expected_root" = "prohibit-password" ] && expected_root="(prohibit-password|without-password)"
-  if sshd -T 2>/dev/null | grep -Eqx "permitrootlogin $expected_root"; then
+  if sshd_T | grep -Eqx "permitrootlogin $expected_root"; then
     pass "SSH PermitRootLogin is $SSH_PERMIT_ROOT_LOGIN as configured"
   else
     fail "SSH PermitRootLogin is not $SSH_PERMIT_ROOT_LOGIN"
