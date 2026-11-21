@@ -43,6 +43,8 @@ ssh_allow_agent_forwarding: false
 ssh_allow_users: []
 ssh_allow_groups: []
 
+ssh_modern_crypto: false
+
 # Remove weak algorithms from the DEFAULT lists (ssh_modern_crypto=true). A "-"
 # in front subtracts from what OpenSSH already offers instead of replacing it,
 # so newer defaults such as the post-quantum hybrid KEX (sntrup761x25519,

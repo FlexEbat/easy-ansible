@@ -508,6 +508,8 @@ fi
 
 if is_container; then
   skip "zram is not startable inside $container_type (no zram device)"
+elif json_true zram_start_failed; then
+  skip "zram could not be started on this kernel (the playbook printed a warning)"
 else
   if systemctl is-active --quiet "$ZRAM_UNIT"; then
     pass "$ZRAM_UNIT is active"

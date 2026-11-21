@@ -3,7 +3,7 @@
   ansible.builtin.import_tasks: sysctl.yml
   tags: [hardening, sysctl]
 
-- name: sudo hardening
+- name: Sudo hardening
   ansible.builtin.import_tasks: sudo.yml
   tags: [hardening, sudo]
 
@@ -23,7 +23,7 @@
   ansible.builtin.import_tasks: banner.yml
   tags: [hardening, banner]
 
-- name: cron and at restrictions
+- name: Cron and at restrictions
   ansible.builtin.import_tasks: cron.yml
   tags: [hardening, cron]
 
@@ -31,7 +31,7 @@
   ansible.builtin.import_tasks: mac.yml
   tags: [hardening, mac]
 
-- name: auditd
+- name: Audit daemon
   ansible.builtin.import_tasks: auditd.yml
   tags: [hardening, auditd]
 
@@ -40,6 +40,6 @@
   tags: [hardening, lynis]
 
 # Last: it needs to know whether the sudo log exists.
-- name: logrotate
+- name: Log rotation
   ansible.builtin.import_tasks: logrotate.yml
   tags: [hardening, logrotate]

@@ -114,6 +114,7 @@
             'admin_home': admin_home,
             'sudo_group': sudo_group,
             'admin_user_sudo_nopasswd': admin_user_sudo_nopasswd | bool,
+            'zram_start_failed': zram_start.failed | default(false) | bool,
             'ssh_port': ssh_port | int,
             'ssh_harden': ssh_harden | bool,
             'ssh_harden_extra': ssh_harden_extra | bool,

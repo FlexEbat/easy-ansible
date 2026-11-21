@@ -24,7 +24,7 @@ firewall, защита от перебора (CrowdSec), Docker, сетевая 
 2. Ставит нужные программы: `sudo`, `curl`, `wget`, `git`, `mtr`, `trippy`,
    `chrony`, `zram`, `CrowdSec` и официальный `Docker CE`; включает автообновления.
 3. Включает firewall (UFW или firewalld): входящие закрыты, открыт SSH
-   (`22/tcp`) и порты, которые вы укажете.
+   (порт `ssh_port`, по умолчанию `22/tcp`) и порты, которые вы укажете.
 4. Настраивает CrowdSec с firewall bouncer: перебор паролей и сканирование
    приводят к бану адреса. Ваши адреса можно внести в whitelist.
 5. Включает BBR, защитные сетевые sysctl, zram-swap, лимит журнала `journald`;
@@ -299,10 +299,10 @@ lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 `verify.sh` определяет ОС и проверяет:
 
 - установленные пакеты (apt/rpm; `curl-minimal` засчитывается как `curl`);
-- SSH: `sshd` слушает порт 22; при `ssh_harden=true` проверяются
+- SSH: `sshd` слушает порт `ssh_port` (по умолчанию 22); при `ssh_harden=true` проверяются
   `PasswordAuthentication` и `PermitRootLogin` из настроек плейбука (вход по
   паролю сам по себе не требуется и не запрещается);
-- firewall: UFW или firewalld (active, порт 22 разрешён — `LIMIT` при
+- firewall: UFW или firewalld (active, порт SSH разрешён — `LIMIT` при
   `firewall_ssh_rate_limit`, `firewall_allowed_ports` вместе с протоколом);
 - `chrony`, лимит `journald`;
 - active `crowdsec` и `crowdsec-firewall-bouncer`, LAPI, метрики, коллекцию
@@ -314,7 +314,7 @@ lxc exec linux-lab -- bash -lc 'cd /root/easy-ansible && ./verify.sh'
 - Docker CE service, ответ daemon, `daemon.json` и доступ к сокету;
 - членство в sudo/wheel; `sudo -n` — только при `admin_user_sudo_nopasswd=true`
   (иначе проверяется, что файл sudoers не создан);
-- отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт 22,
+- отсутствие неожиданных внешних TCP-listener'ов: разрешены только порт SSH,
   loopback и `firewall_allowed_ports`;
 - необходимость перезагрузки.
 
@@ -349,7 +349,7 @@ sudo ./verify.sh
 | `ssh_password_auth` | `true` | вход по паролю (при `ssh_harden`); `false` = только ключи |
 | `ssh_permit_root_login` | `prohibit-password` | `no` / `prohibit-password` / `yes` |
 | `firewall_allowed_ports` | `[]` | дополнительные порты (`port`, `proto`, `from`) |
-| `firewall_ssh_rate_limit` | `true` | UFW: `limit` вместо `allow` для 22/tcp |
+| `firewall_ssh_rate_limit` | `true` | UFW: `limit` вместо `allow` для порта SSH |
 | `auto_updates_enabled` | `true` | unattended-upgrades / dnf-automatic |
 | `auto_reboot` / `auto_reboot_time` | `false` / `04:00` | автоперезагрузка после обновлений (время — только Debian/Ubuntu) |
 | `base_time_sync` | `true` | установить и включить `chrony` (не в контейнерах) |
@@ -411,11 +411,32 @@ ansible-playbook site.yml -e '{"firewall_allowed_ports":[
   `needs-restarting -r` (RHEL), результат попадает в summary и выводится
   предупреждение.
 
+### Остальные переменные
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `base_upgrade_packages` | `true` | обновлять все пакеты при каждом запуске; для повторяемых тестов отключают |
+| `preflight_min_disk_mb` / `preflight_min_memory_mb` | `1024` / `400` | пороги предполётной проверки |
+| `preflight_check_network` | `true` | проверять доступность репозитория Docker |
+| `preflight_allow_locked_admin` | `false` | разрешить создать администратора без ключа и пароля (войти нельзя) |
+| `firewall_close_old_ssh_port` | `false` | после смены порта убрать правило для 22 (после проверки нового) |
+| `ssh_login_grace_time`, `ssh_client_alive_interval`, `ssh_client_alive_count_max`, `ssh_max_sessions`, `ssh_allow_tcp_forwarding`, `ssh_allow_agent_forwarding` | `30`, `300`, `2`, `10`, `true`, `false` | значения для `ssh_harden_extra` |
+| `harden_pwquality_minlen` / `_minclass` / `_maxrepeat` | `12` / `3` / `3` | политика паролей |
+| `harden_sudo_logfile`, `harden_sudo_timestamp_timeout` | `/var/log/sudo.log`, `5` | параметры sudo-защиты |
+| `harden_blacklist_modules`, `harden_blacklist_modules_extra` | список / `[]` | модули ядра для запрета |
+| `harden_cron_allow_users` | `[]` | кому ещё разрешены cron и at |
+| `harden_selinux_mode` | `enforcing` | режим SELinux при `harden_mac` |
+| `logrotate_extra_logs`, `logrotate_rotate` | `[]`, `8` | дополнительные логи и число ротаций |
+| `docker_prune_until`, `docker_prune_schedule`, `docker_prune_all_images`, `docker_prune_volumes` | `168h`, `weekly`, `false`, `false` | параметры очистки Docker |
+
+Ограничение: `ssh_allow_groups` не проверяется предполётной проверкой (членство
+администратора в группе заранее неизвестно) — убедитесь, что он в нужной группе.
+
 ### SSH
 
 По умолчанию плейбук не изменяет конфигурацию `sshd`: порт 22, вход по логину и
 паролю включён. Роль `base` гарантирует, что `openssh-server` установлен, а
-firewall открывает `22/tcp` (UFW — с `limit`: не более 6 новых подключений за
+firewall открывает порт SSH (по умолчанию `22/tcp`; UFW — с `limit`: не более 6 новых подключений за
 30 секунд с одного адреса).
 
 Опционально (`-e ssh_harden=true`) роль `ssh` пишет drop-in
@@ -437,7 +458,7 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 ### Firewall
 
 - Debian/Ubuntu: UFW, default incoming `deny`, outgoing `allow`, routed `deny`.
-  `22/tcp` разрешён явно (SSH на порту по умолчанию).
+  порт SSH (`ssh_port`, по умолчанию `22/tcp`) разрешён явно.
 - RHEL: firewalld, зона по умолчанию или `firewalld_zone`; включается сервис
   `ssh`.
 - `firewall_allowed_ports` добавляет произвольные порты; поле `from`

@@ -139,6 +139,9 @@
       ansible.builtin.file:
         path: /.autorelabel
         state: touch
+        owner: root
+        group: root
+        mode: "0600"
         access_time: preserve
         modification_time: preserve
       when: ansible_facts['selinux']['status'] | default('disabled') == 'disabled'
