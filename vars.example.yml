@@ -83,4 +83,3 @@ firewall_allowed_ports: []
 # logrotate_enabled: true        # включён по умолчанию
 # docker_prune_enabled: true     # еженедельная очистка Docker (volumes не трогает)
 # crowdsec_docker_protection: true   # включён по умолчанию: CrowdSec фильтрует и порты Docker
-

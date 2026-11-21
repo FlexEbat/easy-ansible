@@ -710,15 +710,15 @@ ansible-playbook site.yml -e ssh_harden=true -e ssh_password_auth=false \
 ├── wizard.sh                  # мастер вопросов, создаёт vars.local.yml
 ├── vars.example.yml           # справочник по всем настройкам
 ├── verify.sh
-├── ci/                        # настройки для проверки идемпотентности в CI
+├── ci/                        # профили и annotate.py для проверки идемпотентности в CI
 ├── .github/workflows/idempotency.yml
 └── roles/                     # у каждой роли свои defaults/main.yml
     ├── preflight/     # проверки до начала изменений (любая ошибка — стоп)
     ├── hardening/     # необязательная защита: sudo, pwquality, auditd, AppArmor/SELinux, ...
     ├── base/          # обновление, пакеты, автообновления, chrony, journald, trippy
     ├── admin_user/    # admin_user, пароль/ключи, группа sudo/wheel, sudoers
-    ├── ssh/           # опциональная настройка sshd (ssh_harden, по умолчанию выключена)
-    ├── firewall/      # UFW или firewalld (SSH на порту 22 разрешён)
+    ├── ssh/           # опциональная настройка sshd: порт, ключи, таймауты, алгоритмы (по умолчанию выключена)
+    ├── firewall/      # UFW или firewalld (порт SSH открывается автоматически)
     ├── crowdsec/      # сервис, LAPI, collections, bouncer, whitelist
     ├── kernel/        # BBR, IPv6, sysctl hardening, zram
     └── docker/        # официальный Docker CE и daemon.json
