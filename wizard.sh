@@ -9,6 +9,7 @@
 # The answers are written to vars.local.yml (override with VARS_FILE=...).
 
 set -euo pipefail
+umask 077
 cd "$(dirname "$0")"
 
 OUT="${VARS_FILE:-vars.local.yml}"
@@ -38,6 +39,11 @@ yesno() {
     esac
     echo "  Ответьте y (да) или n (нет)."
   done
+}
+
+# Home directory of USER (empty if unknown).
+home_of() {
+  getent passwd "$1" 2>/dev/null | cut -d: -f6
 }
 
 # Private IPv4 network of the default route (e.g. 192.168.1.0/24), if any.
@@ -110,8 +116,16 @@ if [ "$DEFAULT_USER" = "root" ]; then
   DEFAULT_USER="admin"
 fi
 
+# A random name that does not exist on this machine yet.
 generate_username() {
-  python3 -c 'import secrets, string; print("adm-" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6)))'
+  local name
+  while true; do
+    name=$(python3 -c 'import secrets, string; print("adm-" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(6)))')
+    if ! getent passwd "$name" >/dev/null 2>&1; then
+      echo "$name"
+      return 0
+    fi
+  done
 }
 
 echo
@@ -143,7 +157,11 @@ if [ "$KIND" = "server" ] || [ "$USER_EXISTS" -eq 0 ]; then
   echo "файлу .pub (например, ~/.ssh/id_ed25519.pub). Enter — пропустить."
   while true; do
     read -r -p "Ключ для $ADMIN: " REPLY
-    REPLY="${REPLY/#\~/$HOME}"
+    KEY_HOME="$HOME"
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+      KEY_HOME=$(home_of "$SUDO_USER")
+    fi
+    REPLY="${REPLY/#\~/$KEY_HOME}"
     if [ -f "$REPLY" ]; then
       REPLY=$(head -n 1 "$REPLY")
     fi
@@ -230,7 +248,7 @@ done
 
 # --- firewall ports ---------------------------------------------------------------
 echo
-echo "Firewall закрывает все входящие подключения, кроме SSH (22/tcp)."
+echo "Firewall закрывает все входящие подключения, кроме SSH (порт ниже можно сменить)."
 echo "Какие порты открыть? Через пробел, например: 80 443 51820/udp (Enter — никакие)."
 while true; do
   read -r -p "Порты: " PORTS
@@ -289,12 +307,22 @@ if yesno "Сменить порт SSH (по умолчанию 22)? Порт б�
   echo "  Откройте $SSH_PORT/tcp и в firewall хостера; старое правило для порта 22 останется,"
   echo "  пока вы не включите firewall_close_old_ssh_port (см. README)."
 fi
+HAS_KEYS=0
 if [ -n "$KEY" ]; then
-  if yesno "Запретить вход по паролю и вход root (только по ключу)?" y; then
+  HAS_KEYS=1
+elif [ "$USER_EXISTS" -eq 1 ]; then
+  ADMIN_HOME=$(home_of "$ADMIN")
+  if [ -n "$ADMIN_HOME" ] && [ -s "$ADMIN_HOME/.ssh/authorized_keys" ]; then
+    HAS_KEYS=1
+    echo "  У $ADMIN уже есть ключи в $ADMIN_HOME/.ssh/authorized_keys."
+  fi
+fi
+if [ "$HAS_KEYS" -eq 1 ]; then
+  if yesno "Запретить вход по паролю и вход root (только по ключу; проверьте, что вход по ключу работает)?" y; then
     SSH_HARDEN=1
   fi
 else
-  echo "  Ключ не задан: вход по паролю останется (иначе вы потеряете доступ)."
+  echo "  Ключа нет: вход по паролю останется (иначе вы потеряете доступ)."
 fi
 if yesno "Дополнительные настройки sshd (таймауты, лимиты; туннели и прокси продолжают работать)?" n; then
   SSH_EXTRA=1

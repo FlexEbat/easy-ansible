@@ -56,7 +56,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
   fi
   echo "Нужны права root, перезапускаю через sudo..."
-  exec sudo -- "$SCRIPT" "$@"
+  exec sudo --preserve-env=VARS_FILE -- "$SCRIPT" "$@"
 fi
 
 if ! command -v ansible-playbook >/dev/null 2>&1; then
@@ -75,7 +75,13 @@ fi
 # ansible-core does not ship ansible.posix/community.general; the playbook
 # needs both (authorized_key, firewalld, seport, ufw).
 if command -v ansible-galaxy >/dev/null 2>&1; then
-  ansible-galaxy collection install -r requirements.yml
+  have_collections=1
+  for collection in ansible.posix community.general; do
+    ansible-galaxy collection list "$collection" 2>/dev/null | grep -q "^$collection" || have_collections=0
+  done
+  if [ "$have_collections" -eq 0 ]; then
+    ansible-galaxy collection install -r requirements.yml
+  fi
 fi
 
 # --- settings -----------------------------------------------------------------
@@ -114,4 +120,4 @@ if [ "$PREFLIGHT" -eq 1 ]; then
   EXTRA+=(-e preflight_only=true)
 fi
 
-exec ansible-playbook -i inventory.ini site.yml "${EXTRA[@]}" "${ARGS[@]}"
+exec ansible-playbook -i inventory.ini site.yml ${EXTRA[@]+"${EXTRA[@]}"} ${ARGS[@]+"${ARGS[@]}"}

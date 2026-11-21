@@ -644,10 +644,14 @@ if json_true harden_sudo; then
     fail "sudo hardening drop-in is missing or invalid"
   fi
   if [ "$ADMIN_USER" != "root" ]; then
-    if su - "$ADMIN_USER" -c 'sudo -n true || sudo -n -l' >/dev/null 2>&1 || ! json_true admin_user_sudo_nopasswd; then
-      pass "sudo still works for $ADMIN_USER with the hardening on"
+    if json_true admin_user_sudo_nopasswd; then
+      if su -s /bin/sh "$ADMIN_USER" -c 'sudo -n true' >/dev/null 2>&1; then
+        pass "sudo still works for $ADMIN_USER with the hardening on"
+      else
+        fail "sudo does not work for $ADMIN_USER with the hardening on"
+      fi
     else
-      fail "sudo does not work for $ADMIN_USER with the hardening on"
+      skip "sudo for $ADMIN_USER needs a password; not tested non-interactively"
     fi
   fi
 fi
